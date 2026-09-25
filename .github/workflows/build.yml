@@ -48,6 +48,8 @@ jobs:
       kernelDevice: ${{ matrix.repos.kernelSource.device }}
       DEFCONFIG_NAME: ${{ matrix.repos.defconfig }}
       withKernelSU: ${{ matrix.repos.withKernelSU }}
+      NETHUNTER_WIFI: ${{ matrix.repos.nethunterWiFi }}
+      VARIANT_TAG: ${{ matrix.repos.nethunterWiFi == true && 'nethunter' || 'safe' }}
       ARCH_BOOT: arm64
 
     steps:
@@ -75,13 +77,21 @@ jobs:
         run: |
           mkdir -p toolchains
           echo "$toolchains" | jq -c '.[]' | while read -r tc; do
-            repo=$(echo "$tc" | jq -r '.repo')
+            repo=$(echo "$tc" | jq -r '.repo // empty')
+            archive=$(echo "$tc" | jq -r '.archive // empty')
             branch=$(echo "$tc" | jq -r '.branch // empty')
             name=$(echo "$tc" | jq -r '.name')
-            if [ -n "$branch" ]; then
-              git clone --depth=1 --branch "$branch" "$repo" "toolchains/$name"
+            if [ -n "$archive" ]; then
+              # Prebuilt tarball (e.g. android.googlesource.com +archive URLs)
+              mkdir -p "toolchains/$name"
+              curl -fL "$archive" -o "/tmp/${name}.tar.gz"
+              tar -xzf "/tmp/${name}.tar.gz" -C "toolchains/$name"
             else
-              git clone --depth=1 "$repo" "toolchains/$name"
+              if [ -n "$branch" ]; then
+                git clone --depth=1 --branch "$branch" "$repo" "toolchains/$name"
+              else
+                git clone --depth=1 "$repo" "toolchains/$name"
+              fi
             fi
             # Toolchain layouts differ: proton-clang has bin/ at the repo root,
             # AOSP prebuilts nest it under clang-rXXXXXX/bin. Register every
@@ -177,7 +187,13 @@ jobs:
           # SUSFS kernel-side patches: the actual implementation of the
           # CONFIG_KSU_SUSFS* options already present in gki_defconfig
           rm -rf ./susfs
-          git clone --depth=1 -q https://gitlab.com/simonpunk/susfs4ksu -b gki-android12-5.10 ./susfs
+          # depth=2 so the pinned parent commit is actually present for checkout
+          git clone --depth=2 -q https://gitlab.com/simonpunk/susfs4ksu -b gki-android12-5.10 ./susfs
+          # Pin to the commit predating the unvalidated upstream SUS_KSTAT
+          # type change (2026-09-25) - parity with the kernel author's
+          # known-booting releases, and a suspect removed from the rock-15
+          # bootloop investigation.
+          git -C ./susfs checkout -q 6dc93089a0cedfec3d31739e747231f99d751e9e
           SUSFS_PATCHES=./susfs/kernel_patches
           cp -R "$SUSFS_PATCHES"/fs/* ./fs/
           cp -R "$SUSFS_PATCHES"/include/* ./include/
@@ -225,16 +241,20 @@ jobs:
             --set-str CONFIG_LOCALVERSION "-SuiKernel-Stable-KernelSU-Next" \
             --disable CONFIG_LOCALVERSION_AUTO
 
-          # NetHunter external Wi-Fi support: cfg80211/mac80211 core (required
-          # by out-of-tree rtl8188eus and ath9k_htc) plus the in-tree Atheros
-          # HTC driver (TL-WN722N v1 / AR9271). The v2/v3 Realtek driver is
-          # built as a module in a dedicated step below.
-          scripts/config --file "$DEFCONFIG_FILE" \
-            --enable CONFIG_CFG80211 \
-            --enable CONFIG_MAC80211 \
-            --enable CONFIG_WLAN \
-            --enable CONFIG_WLAN_VENDOR_ATH \
-            --enable CONFIG_ATH9K_HTC
+          # NetHunter external Wi-Fi support is VARIANT-GATED (repos.json:
+          # nethunterWiFi). Enabling cfg80211/mac80211 built-in changes struct
+          # net_device layout and symbol CRCs, which can break MIUI vendor
+          # module loading - the suspected cause of the rock-15 bootloop. The
+          # default variant stays author-parity (boot-safe).
+          if [ "${{ env.NETHUNTER_WIFI }}" = "true" ]; then
+            scripts/config --file "$DEFCONFIG_FILE" \
+              --enable CONFIG_CFG80211 \
+              --enable CONFIG_MAC80211 \
+              --enable CONFIG_WLAN \
+              --enable CONFIG_WLAN_VENDOR_ATH \
+              --enable CONFIG_ATH9K_HTC
+            echo "NetHunter variant: wireless configs enabled"
+          fi
           touch .scmversion
 
           make ${args} ${{ env.DEFCONFIG_NAME }}
@@ -251,6 +271,7 @@ jobs:
           test -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image" || { echo "Image missing - build failed"; exit 1; }
 
       - name: "Build rtl8188eus module (TL-WN722N v2/v3)"
+        if: ${{ matrix.repos.nethunterWiFi == true }}
         working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
@@ -335,7 +356,7 @@ jobs:
           ## AnyKernel setup
           # global properties
           properties() { '
-          kernel.string=SuiKernelNethunter-GKI-rock (KernelSU-Next + SUSFS + NetHunter WiFi)
+          kernel.string=SuiKernelNethunter-GKI-rock-${{ env.VARIANT_TAG }} (KernelSU-Next + SUSFS)
           do.devicecheck=0
           # The 8188eu.ko is delivered via the rtl8188eus artifact / Stryker,
           # not the boot ramdisk: the rock boot image has no modifiable
@@ -383,7 +404,7 @@ jobs:
           grep -q "split_boot" "$AK3/anykernel.sh" && grep -q "flash_boot" "$AK3/anykernel.sh"
 
           cd "$AK3"
-          ZIPNAME="SuiKernelNethunter-rock-$(date +%Y%m%d-%H%M).zip"
+          ZIPNAME="SuiKernel-rock-${{ env.VARIANT_TAG }}-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../$ZIPNAME" .
           cd ../..
           cp "${{ env.kernelDir }}/$ZIPNAME" .
@@ -415,6 +436,7 @@ jobs:
           retention-days: 7
 
       - name: "Upload rtl8188eus module"
+        if: ${{ matrix.repos.nethunterWiFi == true }}
         uses: actions/upload-artifact@v4
         with:
           name: rtl8188eus-${{ env.kernelDevice }}-${{ env.kernelName }}
@@ -435,19 +457,19 @@ jobs:
       - name: "Release"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: rock-${{ github.run_number }}
-          name: SuiKernelNethunter rock build ${{ github.run_number }}
+          tag_name: rock-${{ github.run_number }}-${{ env.VARIANT_TAG }}
+          name: SuiKernel rock build ${{ github.run_number }} ${{ env.VARIANT_TAG == 'safe' && '(boot-safe, author-parity)' || '(NetHunter WiFi)' }}
           body: |
             Automated GKI build for rock (Poco M5 / Redmi 11 Prime 5G)
+            - Variant: ${{ env.VARIANT_TAG }} ${{ env.VARIANT_TAG == 'safe' && '- no wireless config changes, parity with the SuiKernel author builds' || '- cfg80211/mac80211/ath9k_htc built-in + rtl8188eus module' }}
             - Kernel: ${{ env.kernelRepo }} (${{ env.kernelBranch }})
-            - KernelSU-Next (pershoot dev-susfs fork) + SUSFS
-            - NetHunter: HID gadget, RNDIS, mac80211 + ath9k_htc built-in, rtl8188eus module (TL-WN722N v2/v3)
+            - KernelSU-Next (pershoot dev-susfs fork) + SUSFS (pinned)
             - Defconfig: ${{ env.DEFCONFIG_NAME }}
 
             **Install**: flash `AnyKernel3-*.zip` in recovery, or unpack and re-pack `Image` into your boot image.
 
-            **External Wi-Fi (TL-WN722N v2/v3)**: grab `8188eu.ko` from the
-            `rtl8188eus-rock-*` artifact, then from a root shell:
+            **External Wi-Fi (NetHunter variant only, TL-WN722N v2/v3)**: grab
+            `8188eu.ko` from the `rtl8188eus-rock-*` artifact, then from a root shell:
             `adb push 8188eu.ko /data/local/tmp/` and
             `insmod /data/local/tmp/8188eu.ko` (Stryker can manage the driver
             itself). Monitor mode: `iw dev wlanX set monitor none`.
