@@ -1,0 +1,29 @@
+progress 1.34 25
+
+Archive:  /data/user/0/vctsrt.cntgtj.uqfwgg/cache/anykernel3_20260926_025514/anykernel_20260926_025514.zip
+inflating: tools/fec
+inflating: tools/httools_static
+inflating: META-INF/com/google/android/updater-script
+inflating: META-INF/com/google/android/update-binary
+inflating: LICENSE
+inflating: modules/system/lib/modules/placeholder
+inflating: ramdisk/placeholder
+inflating: tools/snapshotupdater_static
+inflating: tools/magiskpolicy
+inflating: tools/ak3-core.sh
+inflating: Image
+inflating: modules/system/lib/modules/8188eu.ko
+inflating: tools/magiskboot
+inflating: modules/system/lib/modules/load_nethunter_wifi.sh
+inflating: anykernel.sh
+inflating: tools/busybox
+inflating: tools/lptools_static
+inflating: patch/placeholder
+SuiKernelNethunter-GKI-rock (KernelSU-Next + SUSFS + NetHunter WiFi)
+
+AnyKernel3 by osm0sis @ xda-developers
+
+AK_BASE_VERSION=20260904
+
+Installing...
+anykernel.sh: line 45: syntax error: unexpected end of file (expecting "}")
