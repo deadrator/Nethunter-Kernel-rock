@@ -1,11 +1,12 @@
-[  {
+[
+  {
     "kernelSource": {
-      "name": "MikasaNethunter",
-      "repo": "https://github.com/noophyy/mikasa_kernel_realme2_c1.git",
-      "branch": "Light",
-      "device": "mikasa"
+      "name": "SuiKernelNethunter",
+      "repo": "https://github.com/LoggingNewMemory/SuiKernel-android12-5.10.git",
+      "branch": "main",
+      "device": "rock"
     },
-    "withKernelSU": false,
+    "withKernelSU": true,
     "toolchains": [
       {
         "repo": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
