@@ -337,7 +337,10 @@ jobs:
           properties() { '
           kernel.string=SuiKernelNethunter-GKI-rock (KernelSU-Next + SUSFS + NetHunter WiFi)
           do.devicecheck=0
-          do.modules=1
+          # The 8188eu.ko is delivered via the rtl8188eus artifact / Stryker,
+          # not the boot ramdisk: rock's boot image has no modifiable
+          # ramdisk for the systemless overlay to land in.
+          do.modules=0
           do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
@@ -361,7 +364,14 @@ jobs:
           . tools/ak3-core.sh;
 
           # boot install
-          write_boot;
+          # GKI: boot holds only kernel+dtb (the generic ramdisk lives in
+          # init_boot), so unpack without ramdisk handling, then repack+flash.
+          # flash_boot skips the ramdisk-repack stage that write_boot runs
+          # (there is no ramdisk to repack); write_boot alone also repacked
+          # from a split_img that never existed - the "Repacking image
+          # failed. Aborting..." failure from the user's install log.
+          split_boot;
+          flash_boot;
           ## end boot install
           EOF
 
@@ -429,9 +439,11 @@ jobs:
 
             **Install**: flash `AnyKernel3-*.zip` in recovery, or unpack and re-pack `Image` into your boot image.
 
-            **External Wi-Fi (TL-WN722N v2/v3)**: after flashing, from a root shell run
-            `sh /system/lib/modules/load_nethunter_wifi.sh` with the adapter plugged in
-            (OTG + powered hub recommended). Monitor mode via `iw dev wlan0 set monitor none`.
+            **External Wi-Fi (TL-WN722N v2/v3)**: grab `8188eu.ko` from the
+            `rtl8188eus-rock-*` artifact, then from a root shell:
+            `adb push 8188eu.ko /data/local/tmp/` and
+            `insmod /data/local/tmp/8188eu.ko` (Stryker can manage the driver
+            itself). Monitor mode: `iw dev wlanX set monitor none`.
           files: |
             ${{ env.AK3ZIP }}
             ${{ env.AK3ZIP }}.sha256
