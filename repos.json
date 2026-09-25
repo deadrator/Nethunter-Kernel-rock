@@ -3,7 +3,7 @@
     "kernelSource": {
       "name": "SuiKernelNethunter",
       "repo": "https://github.com/LoggingNewMemory/SuiKernel-android12-5.10.git",
-      "branch": "main",
+      "branch": "suikernel-stable",
       "device": "rock"
     },
     "withKernelSU": true,
