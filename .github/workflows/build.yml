@@ -7,6 +7,9 @@ env:
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   Set-repos:
     name: "Parse repos.json"
@@ -43,8 +46,10 @@ jobs:
       kernelRepo: ${{ matrix.repos.kernelSource.repo }}
       kernelBranch: ${{ matrix.repos.kernelSource.branch }}
       kernelDevice: ${{ matrix.repos.kernelSource.device }}
-      DEFCONFIG_NAME: ${{ matrix.repos.kernelSource.device }}_defconfig
+      DEFCONFIG_NAME: ${{ matrix.repos.defconfig }}
       withKernelSU: ${{ matrix.repos.withKernelSU }}
+      ksuVersion: ${{ matrix.repos.ksuVersion }}
+      ARCH_BOOT: arm64
 
     steps:
       - name: "Create working dir"
@@ -55,7 +60,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc curl git zip ftp gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev lftp zstd wget libfl-dev python3 python-is-python3 libarchive-tools
+          sudo apt-get install -y build-essential bc curl git zip ftp gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev lftp zstd wget libfl-dev python3 python-is-python3 libarchive-tools cpio flex bison
 
       - name: "Clone kernel source"
         working-directory: ${{ github.workspace }}/${{ env.kernelDir }}
@@ -72,12 +77,15 @@ jobs:
           mkdir -p toolchains
           echo "$toolchains" | jq -c '.[]' | while read -r tc; do
             repo=$(echo "$tc" | jq -r '.repo')
-            branch=$(echo "$tc" | jq -r '.branch')
+            branch=$(echo "$tc" | jq -r '.branch // empty')
             name=$(echo "$tc" | jq -r '.name')
-            git clone --depth=1 --branch "$branch" "$repo" "toolchains/$name"
+            if [ -n "$branch" ]; then
+              git clone --depth=1 --branch "$branch" "$repo" "toolchains/$name"
+            else
+              git clone --depth=1 "$repo" "toolchains/$name"
+            fi
             echo "$(pwd)/toolchains/$name/bin" >> "$GITHUB_PATH"
           done
-          echo "PATH Variable: $PATH"
 
       - name: "Set args"
         id: generate-args
@@ -85,50 +93,36 @@ jobs:
         shell: bash
         env:
           params: ${{ toJSON(matrix.repos.params) }}
-          extraParams: ${{ toJSON(matrix.repos.extraParams) }}
         run: |
-          ARCH=$(echo "$params" | jq -r '.ARCH // empty')
-          CROSS_COMPILE=$(echo "$params" | jq -r '.CROSS_COMPILE // empty')
-          CROSS_COMPILE_COMPAT=$(echo "$params" | jq -r '.CROSS_COMPILE_COMPAT // empty')
-          CROSS_COMPILE_ARM32=$(echo "$params" | jq -r '.CROSS_COMPILE_ARM32 // empty')
-          CLANG_TRIPLE=$(echo "$params" | jq -r '.CLANG_TRIPLE // empty')
-          AR=$(echo "$params" | jq -r '.AR // empty')
-          CC=$(echo "$params" | jq -r '.CC // empty')
-
-          echo "ARCH=$ARCH" >> "$GITHUB_ENV"
+          get_param() { echo "$params" | jq -r --arg k "$1" '.[$k] // empty'; }
 
           args="-j$(nproc --all)"
           if [ -n "${{ env.OUT_DIR }}" ]; then
             mkdir -p "$(pwd)/${{ env.OUT_DIR }}"
             args="${args} O=$(pwd)/${{ env.OUT_DIR }}"
           fi
-          if [ -n "$ARCH" ]; then
-            args="${args} ARCH=$ARCH"
-          fi
-          if [ -n "$CROSS_COMPILE" ]; then
-            args="${args} CROSS_COMPILE=$CROSS_COMPILE"
-          fi
-          if [ -n "$CLANG_TRIPLE" ]; then
-            args="${args} CLANG_TRIPLE=$CLANG_TRIPLE"
-          fi
-          if [ -n "$CROSS_COMPILE_COMPAT" ]; then
-            args="${args} CROSS_COMPILE_ARM32=$CROSS_COMPILE_COMPAT"
-          fi
-          if [ -n "$AR" ]; then
-            args="${args} AR=$AR"
-          fi
-          if [ -n "$CC" ]; then
-            args="${args} CC=$CC"
-          fi
 
-          echo "args=$args" >> "$GITHUB_OUTPUT"
+          # Emit every parameter as VAR=value on the make command line.
+          # Array-valued params (e.g. LLVM) expand to multiple tokens.
+          for key in $(echo "$params" | jq -r 'keys[]'); do
+            val=$(get_param "$key")
+            [ -n "$val" ] || continue
+            if echo "$val" | jq empty >/dev/null 2>&1; then
+              for item in $(echo "$val" | jq -r '.[]'); do
+                args="${args} ${key}=${item}"
+              done
+            else
+              args="${args} ${key}=${val}"
+            fi
+          done
 
-          extra_params=$(echo "$extraParams" | jq -r 'to_entries[] | select(.value != "") | "\(.key)=\(.value)"' | tr '\n' ' ' | sed 's/ $//')
-          echo "extra_params=$extra_params" >> "$GITHUB_OUTPUT"
+          echo "args=${args}" >> "$GITHUB_OUTPUT"
+          echo "Final make args: ${args}"
 
       - name: "Update KernelSU"
-        working-directory: ./\({{ env.kernelDir }}/\){{ env.kernelName }}
         if: ${{ env.withKernelSU == 'true' }}
+        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
+        shell: bash
         run: |
           if [ -d "./KernelSU" ]; then
             rm -rf "./KernelSU"
@@ -137,33 +131,21 @@ jobs:
             rm -rf "./drivers/kernelsu"
           fi
 
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s v3.3.0
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "${{ env.ksuVersion }}"
 
-          echo -e "\nCONFIG_KPROBES=y" >> ./arch/\({{ env.ARCH }}/configs/\){{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_HAVE_KPROBES=y" >> ./arch/\({{ env.ARCH }}/configs/\){{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_KPROBE_EVENTS=y" >> ./arch/\({{ env.ARCH }}/configs/\){{ env.DEFCONFIG_NAME }}
+          ls -la ./drivers/kernelsu || true
+          # Verify the KernelSU driver is actually wired into the tree.
+          grep -q "config KSU" ./drivers/kernelsu/Kconfig
+          echo "KernelSU-Next ${{ env.ksuVersion }} wired into drivers/kernelsu"
 
-          cat ./arch/\({{ env.ARCH }}/configs/\){{ env.DEFCONFIG_NAME }}
       - name: "Make defconfig"
         working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
         shell: bash
         run: |
-          echo "PATH Variable: $PATH"
           make ${args} ${{ env.DEFCONFIG_NAME }}
-
-      - name: "Before Action"
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.OUT_DIR }}
-        shell: bash
-        run: |
-          echo "args ---> ${args}"
-          echo "current path ---> $(pwd)"
-          echo "CONFIG_OF_CONFIGFS=y" >> .config
-          echo "CONFIG_OF_OVERLAY=y" >> .config
-          cat .config
+          grep -E "CONFIG_LOCALVERSION=|CONFIG_LTO|CONFIG_KPROBES|CONFIG_KSU=|CONFIG_KSU_SUSFS=" "${{ env.OUT_DIR }}/.config" || true
 
       - name: "Build kernel"
         working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
@@ -171,28 +153,82 @@ jobs:
           args: ${{ steps.generate-args.outputs.args }}
         shell: bash
         run: |
-          echo "PATH Variable: $PATH"
-          make ${args}
+          set -o pipefail
+          make ${args} 2>&1 | tail -n 120
+          test -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image" || { echo "Image missing - build failed"; exit 1; }
 
-      - name: "Post Action"
+      - name: "Assemble AnyKernel3 flashable zip"
         shell: bash
         run: |
-          pwd
-          find "./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/" -type f
+          AK3="${{ env.kernelDir }}/AnyKernel3"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$AK3"
+          rm -rf "$AK3/.git" "$AK3/.github" "$AK3/README.md" "$AK3/anykernel.sh"
 
-      - name: "Upload Image"
+          cp "${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image" "$AK3/Image"
+
+          DTB="${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/dtb"
+          if [ -f "$DTB" ]; then
+            cp "$DTB" "$AK3/dtb"
+          fi
+
+          cat > "$AK3/anykernel.sh" <<'EOF'
+          # AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          ## AnyKernel setup
+          # global properties
+          properties() { '
+          kernel.string=SuiKernelNethunter-GKI-rock (KernelSU-Next + SUSFS)
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=
+          supported.versions=
+          supported.patchlevels=
+          '; } # end properties
+
+          # boot files attributes
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $RAMDISK/*;
+          } # end attributes
+
+          # boot shell variables
+          BLOCK=auto;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh;
+
+          # boot install
+          write_boot;
+          ## end boot install
+          EOF
+
+          cd "$AK3"
+          ZIPNAME="SuiKernelNethunter-rock-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../$ZIPNAME" .
+          cd ../..
+          cp "${{ env.kernelDir }}/$ZIPNAME" .
+          sha256sum "$ZIPNAME" > "$ZIPNAME.sha256"
+          echo "AK3ZIP=$ZIPNAME" >> "$GITHUB_ENV"
+
+      - name: "Upload kernel Image"
         uses: actions/upload-artifact@v4
         with:
           name: Image-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
-          if-no-files-found: ignore
+          path: ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image
+          if-no-files-found: error
           retention-days: 7
 
       - name: "Upload Image.gz"
         uses: actions/upload-artifact@v4
         with:
           name: Image.gz-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz
+          path: ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image.gz
           if-no-files-found: ignore
           retention-days: 7
 
@@ -200,14 +236,34 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dtb-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb
+          path: ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/dtb
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: "Upload dtbo.img"
+      - name: "Upload AnyKernel3 flashable zip"
         uses: actions/upload-artifact@v4
         with:
-          name: dtbo.img-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img
-          if-no-files-found: ignore
+          name: AnyKernel3-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
+          path: |
+            ${{ env.AK3ZIP }}
+            ${{ env.AK3ZIP }}.sha256
+          if-no-files-found: error
           retention-days: 7
+
+      - name: "Release"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rock-${{ github.run_number }}
+          name: SuiKernelNethunter rock build ${{ github.run_number }}
+          body: |
+            Automated GKI build for rock (Poco M5 / Redmi 11 Prime 5G)
+            - Kernel: ${{ env.kernelRepo }} (${{ env.kernelBranch }})
+            - KernelSU-Next: ${{ env.ksuVersion }} + SUSFS
+            - Defconfig: ${{ env.DEFCONFIG_NAME }}
+
+            **Install**: flash `AnyKernel3-*.zip` in recovery, or unpack and re-pack `Image` into your boot image.
+          files: |
+            ${{ env.AK3ZIP }}
+            ${{ env.AK3ZIP }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

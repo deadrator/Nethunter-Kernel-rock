@@ -6,34 +6,23 @@
       "branch": "suikernel-stable",
       "device": "rock"
     },
+    "defconfig": "gki_defconfig",
     "withKernelSU": true,
+    "ksuVersion": "v3.3.0",
     "toolchains": [
       {
-        "repo": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
-        "branch": "master",
-        "name": "gas"
-      },
-      {
-        "repo": "https://github.com/kdrag0n/proton-clang.git",
-        "branch": "master",
+        "repo": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86",
+        "branch": "master-kernel-build-2022",
         "name": "clang"
       }
     ],
     "params": {
       "ARCH": "arm64",
+      "CC": "clang",
+      "LLVM": ["1"],
+      "LLVM_IAS": ["1"],
       "CROSS_COMPILE": "aarch64-linux-gnu-",
-      "CROSS_COMPILE_ARM32": "arm-linux-gnueabi-",
-      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabi-",
-      "CLANG_TRIPLE": "aarch64-linux-gnu-",
-      "AR": "llvm-ar",
-      "OBJDUMP": "llvm-objdump",
-      "STRIP": "llvm-strip",
-      "OBJCOPY": "llvm-objcopy",
-      "NM": "llvm-nm",
-      "CC": "clang"
-    },
-    "extraParams": {
-      "KEEP": ""
+      "CROSS_COMPILE_COMPAT": "arm-linux-gnueabi-"
     }
   }
 ]
