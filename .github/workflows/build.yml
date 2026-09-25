@@ -9,23 +9,23 @@ on:
 
 jobs:
   Set-repos:
-    name: "🐂 Parse repos.json"
+    name: "Parse repos.json"
     runs-on: ubuntu-latest
     outputs:
       repos: ${{ steps.generate-matrix.outputs.repos }}
     steps:
-      - name: "😄 Checkout"
+      - name: "Checkout"
         uses: actions/checkout@v3
 
-      - name: "😆 Generate Matrix"
+      - name: "Generate Matrix"
         id: generate-matrix
         run: |
           echo "repos<> $GITHUB_OUTPUT
           cat \({{ env.CONFIGURATION }} >>\)GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          
+
   Build-Kernel:
-    name: "🐎 Build kernel"
+    name: "Build kernel"
     runs-on: ubuntu-latest
     needs:
       - Set-repos
@@ -46,20 +46,20 @@ jobs:
 
       withKernelSU: ${{ matrix.repos.withKernelSU }}
     steps:
-      - name: "✨ Create working dir"
+      - name: "Create working dir"
         run: mkdir -p $kernelDir
 
-      - name: "⭐ Install prerequisites"
+      - name: "Install prerequisites"
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc curl git zip ftp gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev lftp zstd wget libfl-dev python2 python3 libarchive-tools
 
-      - name: "🌟 Clone kernel source => (${{ env.kernelRepo }})"
+      - name: "Clone kernel source => (${{ env.kernelRepo }})"
         working-directory: ./${{ env.kernelDir }}
         run: |
           git clone --recursive --branch \(kernelBranch\)kernelRepo $kernelName --depth=1
 
-      - name: "💫 Get toolchains"
+      - name: "Get toolchains"
         working-directory: ./${{ env.kernelDir }}
         env:
           toolchains: "${{ toJSON(matrix.repos.toolchains) }}"
@@ -72,7 +72,7 @@ jobs:
 
           echo "PATH Variable: $PATH"
 
-      - name: "😎 Set args"
+      - name: "Set args"
         id: generate-args
         working-directory: ./${{ env.kernelDir }}
         env:
@@ -119,7 +119,7 @@ jobs:
           extra_params=\((echo\)extraParams | jq -r ' to_entries[] | select(.value != "") | "\(.key)=\(.value)"' | tr "\n" " " | sed 's/ $//')
           echo "args=\(args\)extra_params" >> $GITHUB_OUTPUT
 
-      - name: "😋 Update KernelSU"
+      - name: "Update KernelSU"
         working-directory: ./\({{ env.kernelDir }}/\){{ env.kernelName }}
         if: ${{ env.withKernelSU == 'true' }}
         run: |
@@ -138,7 +138,7 @@ jobs:
 
           cat ./arch/\({{ env.ARCH }}/configs/\){{ env.DEFCONFIG_NAME }}
 
-      - name: "👍 Make defconfig"
+      - name: "Make defconfig"
         working-directory: ./\({{ env.kernelDir }}/\){{ env.kernelName }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
@@ -146,9 +146,9 @@ jobs:
           echo "PATH Variable: $PATH"
           make \({{ env.args }}\){{ env.DEFCONFIG_NAME }}
 
-      - name: "🏴‍☠️ Before Action "
+      - name: "Before Action"
         env:
-            args: ${{ steps.generate-args.outputs.args }}
+          args: ${{ steps.generate-args.outputs.args }}
         working-directory: ./\({{ env.kernelDir }}/\){{ env.OUT_DIR }}
         run: |
           echo "args ---> ${args}"
@@ -157,7 +157,7 @@ jobs:
           echo "CONFIG_OF_OVERLAY=y" >> .config
           cat .config
           
-      - name: "🎶 Build kernel"
+      - name: "Build kernel"
         working-directory: ./\({{ env.kernelDir }}/\){{ env.kernelName }}
         env:
           args: ${{ steps.generate-args.outputs.args }}
@@ -165,14 +165,14 @@ jobs:
           echo "PATH Variable: $PATH"
           make ${args}
 
-      - name: "🏴‍☠️ Post Action "
+      - name: "Post Action"
         run: |
           # make ${args} dtbs
           # make ${args} dtboimage
           pwd
           find ./\({{ env.kernelDir }}/\){{ env.OUT_DIR }}/arch/${{ env.ARCH }}/ -type f
 
-      - name: "💛 Upload Image"
+      - name: "Upload Image"
         uses: actions/upload-artifact@v3
         with:
           name: Image(\({{ env.kernelDevice }}-\){{ env.kernelName }}-${{ env.kernelBranch }})
@@ -180,7 +180,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: "💙 Upload Image.gz"
+      - name: "Upload Image.gz"
         uses: actions/upload-artifact@v3
         with:
           name: Image.gz(\({{ env.kernelDevice }}-\){{ env.kernelName }}-${{ env.kernelBranch }})
@@ -188,7 +188,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: "💜 Upload dtb"
+      - name: "Upload dtb"
         uses: actions/upload-artifact@v3
         with:
           name: dtb(\({{ env.kernelDevice }}-\){{ env.kernelName }}-${{ env.kernelBranch }})
@@ -196,7 +196,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: "❤️ Upload dtbo.img"
+      - name: "Upload dtbo.img"
         uses: actions/upload-artifact@v3
         with:
           name: dtbo.img(\({{ env.kernelDevice }}-\){{ env.kernelName }}-${{ env.kernelBranch }})
