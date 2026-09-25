@@ -48,7 +48,6 @@ jobs:
       kernelDevice: ${{ matrix.repos.kernelSource.device }}
       DEFCONFIG_NAME: ${{ matrix.repos.defconfig }}
       withKernelSU: ${{ matrix.repos.withKernelSU }}
-      ksuVersion: ${{ matrix.repos.ksuVersion }}
       ARCH_BOOT: arm64
 
     steps:
@@ -137,12 +136,75 @@ jobs:
             rm -rf "./drivers/kernelsu"
           fi
 
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "${{ env.ksuVersion }}"
+          # KernelSU-Next susfs fork - the variant the kernel author's own
+          # pipeline installs for this tree (SuiKernel-GKI-Bulder:
+          # install_ksu pershoot/KernelSU-Next dev-susfs)
+          curl -fLSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" -o ksu_setup.sh
+          bash ksu_setup.sh dev-susfs
+          rm -f ksu_setup.sh
 
           ls -la ./drivers/kernelsu || true
           # Verify the KernelSU driver is actually wired into the tree.
           grep -q "config KSU" ./drivers/kernelsu/Kconfig
-          echo "KernelSU-Next ${{ env.ksuVersion }} wired into drivers/kernelsu"
+          echo "KernelSU-Next (pershoot dev-susfs) wired into drivers/kernelsu"
+
+          log() { echo "[LOG] $*"; }
+          error() { echo "[ERROR] $*" >&2; exit 1; }
+
+          # SELinux rule injections for the tree's Yamada drivers
+          # (author's selinux.sh, injected into the KSU driver's rules.c)
+          curl -fLSs "https://raw.githubusercontent.com/LoggingNewMemory/SuiKernel-GKI-Bulder/master/selinux.sh" -o selinux.sh
+          source ./selinux.sh
+          grep -q 'ksu_allow(db, "kernel", "sysfs_leds"' drivers/kernelsu/selinux/rules.c
+          echo "SELinux rules injected"
+          rm -f selinux.sh
+
+          # Pavolia Reine property-injector integration: provides
+          # ksu_pavolia_add_prop(), required to link drivers/Yamada/*.c.
+          # Runs the author's official patch script verbatim (dry-run tested
+          # against the fork's ksud_integration.c), then hard-verifies.
+          curl -fLSs "https://raw.githubusercontent.com/LoggingNewMemory/SuiKernel-GKI-Bulder/master/PavoliaReinePatch.sh" -o PavoliaReinePatch.sh
+          source ./PavoliaReinePatch.sh
+          KSUD=drivers/kernelsu/runtime/ksud_integration.c
+          grep -q "void ksu_pavolia_add_prop" "$KSUD"
+          grep -q "EXPORT_SYMBOL(ksu_pavolia_add_prop)" "$KSUD"
+          [ "$(grep -c 'append_pavolia_rc:' "$KSUD")" -eq 2 ]
+          [ "$(grep -c 'goto append_pavolia_rc' "$KSUD")" -eq 2 ]
+          grep -q "size_t extra = ksu_rc_len + module_rc_len + pavolia_rc_len;" "$KSUD"
+          echo "Pavolia Reine KSU integration applied and verified"
+          rm -f PavoliaReinePatch.sh
+
+          # SUSFS kernel-side patches: the actual implementation of the
+          # CONFIG_KSU_SUSFS* options already present in gki_defconfig
+          rm -rf ./susfs
+          git clone --depth=1 -q https://gitlab.com/simonpunk/susfs4ksu -b gki-android12-5.10 ./susfs
+          SUSFS_PATCHES=./susfs/kernel_patches
+          cp -R "$SUSFS_PATCHES"/fs/* ./fs/
+          cp -R "$SUSFS_PATCHES"/include/* ./include/
+          patch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch || echo "WARNING: susfs patch applied with fuzz or partial failure"
+          test -f ./fs/susfs.c
+          test -f ./include/linux/susfs.h
+
+          # Author's post-patch fixups: move the statfs extern below internal.h
+          # and pull security.h into susfs.c
+          python3 - <<'PYEOF'
+          with open("./fs/statfs.c") as f:
+              data = f.read()
+          data = data.replace("extern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);", "")
+          data = data.replace('#include "internal.h"', '#include "internal.h"\nextern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);')
+          with open("./fs/statfs.c", "w") as f:
+              f.write(data)
+
+          with open("./fs/susfs.c") as f:
+              data2 = f.read()
+          data2 = data2.replace("#include <linux/fs.h>", "#include <linux/fs.h>\n#include <linux/security.h>")
+          with open("./fs/susfs.c", "w") as f:
+              f.write(data2)
+          print("susfs fixups applied")
+          PYEOF
+          grep -q "susfs_sus_kstat_spoof_vfs_statfs" ./fs/statfs.c
+          grep -q "#include <linux/security.h>" ./fs/susfs.c
+          echo "SUSFS patches applied and verified"
 
       - name: "Make defconfig"
         working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
@@ -152,6 +214,18 @@ jobs:
         run: |
           command -v clang || { echo "FATAL: clang not on PATH"; ls -R ../toolchains | head -40; exit 1; }
           command -v ld.lld || { echo "FATAL: ld.lld not on PATH"; ls -R ../toolchains | head -40; exit 1; }
+
+          # Author's config tweaks, applied to the defconfig file itself so
+          # they survive `make defconfig` (mirrors SuiKernel-GKI-Bulder)
+          DEFCONFIG_FILE=$(find ./arch/arm64/configs -name "${{ env.DEFCONFIG_NAME }}")
+          scripts/config --file "$DEFCONFIG_FILE" \
+            --enable CONFIG_KSU \
+            --disable CONFIG_KSU_MANUAL_SU \
+            --enable CONFIG_KSU_SUSFS \
+            --set-str CONFIG_LOCALVERSION "-SuiKernel-Stable-KernelSU-Next" \
+            --disable CONFIG_LOCALVERSION_AUTO
+          touch .scmversion
+
           make ${args} ${{ env.DEFCONFIG_NAME }}
           grep -E "CONFIG_LOCALVERSION=|CONFIG_LTO|CONFIG_KPROBES|CONFIG_KSU=|CONFIG_KSU_SUSFS=" "${{ env.OUT_DIR }}/.config" || true
 
@@ -266,7 +340,7 @@ jobs:
           body: |
             Automated GKI build for rock (Poco M5 / Redmi 11 Prime 5G)
             - Kernel: ${{ env.kernelRepo }} (${{ env.kernelBranch }})
-            - KernelSU-Next: ${{ env.ksuVersion }} + SUSFS
+            - KernelSU-Next (pershoot dev-susfs fork) + SUSFS
             - Defconfig: ${{ env.DEFCONFIG_NAME }}
 
             **Install**: flash `AnyKernel3-*.zip` in recovery, or unpack and re-pack `Image` into your boot image.

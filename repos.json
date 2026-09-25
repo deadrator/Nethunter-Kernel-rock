@@ -8,7 +8,6 @@
     },
     "defconfig": "gki_defconfig",
     "withKernelSU": true,
-    "ksuVersion": "v3.3.0",
     "toolchains": [
       {
         "repo": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86",
