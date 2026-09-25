@@ -224,6 +224,17 @@ jobs:
             --enable CONFIG_KSU_SUSFS \
             --set-str CONFIG_LOCALVERSION "-SuiKernel-Stable-KernelSU-Next" \
             --disable CONFIG_LOCALVERSION_AUTO
+
+          # NetHunter external Wi-Fi support: cfg80211/mac80211 core (required
+          # by out-of-tree rtl8188eus and ath9k_htc) plus the in-tree Atheros
+          # HTC driver (TL-WN722N v1 / AR9271). The v2/v3 Realtek driver is
+          # built as a module in a dedicated step below.
+          scripts/config --file "$DEFCONFIG_FILE" \
+            --enable CONFIG_CFG80211 \
+            --enable CONFIG_MAC80211 \
+            --enable CONFIG_WLAN \
+            --enable CONFIG_WLAN_VENDOR_ATH \
+            --enable CONFIG_ATH9K_HTC
           touch .scmversion
 
           make ${args} ${{ env.DEFCONFIG_NAME }}
@@ -239,6 +250,39 @@ jobs:
           make ${args} 2>&1 | tail -n 120
           test -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image" || { echo "Image missing - build failed"; exit 1; }
 
+      - name: "Build rtl8188eus module (TL-WN722N v2/v3)"
+        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
+        env:
+          args: ${{ steps.generate-args.outputs.args }}
+        shell: bash
+        run: |
+          # aircrack-ng rtl8188eus driver for Realtek RTL8188EUS dongles
+          # (TP-Link TL-WN722N v2/v3). Built as an external module against the
+          # just-built kernel tree; the module is packed into the AnyKernel
+          # zip below (and uploaded as its own artifact). Android does not
+          # auto-load external modules, so it is loaded with root via the
+          # included load script or a manual insmod - same as the official
+          # NetHunter kernel packages.
+          git clone --depth=1 -b v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git ../rtl8188eus
+
+          # Invoke straight through the kernel build system: the driver's own
+          # Makefile has a KERNELRELEASE-gated kbuild section (obj-
+          # $(CONFIG_RTL8188EU)), so M=<driver> is all the harness it needs.
+          # O= is kept so kbuild resolves CONFIG_MODVERSIONS symbol CRCs from
+          # out/Module.symvers of the kernel we just built.
+          # CONFIG_RTL8188EU=m replaces the export done by its bare `make`
+          # target, which we bypass.
+          make ${args} M=$(pwd)/../rtl8188eus modules \
+            KSRC=$(pwd) \
+            USER_EXTRA_CFLAGS="-Wno-error" \
+            CONFIG_RTL8188EU=m 2>&1 | tail -n 60
+          MOD=$(find ../rtl8188eus -maxdepth 1 -name '*.ko' | head -1)
+          test -n "$MOD" || { echo "FATAL: rtl8188eus .ko not produced"; exit 1; }
+          echo "Built module: $MOD"
+          mkdir -p ../modules_out
+          cp "$MOD" ../modules_out/
+          echo "RTLKO=$(basename "$MOD")" >> "$GITHUB_ENV"
+
       - name: "Assemble AnyKernel3 flashable zip"
         shell: bash
         run: |
@@ -253,6 +297,26 @@ jobs:
             cp "$DTB" "$AK3/dtb"
           fi
 
+          # Pack the rtl8188eus module (TL-WN722N v2/v3) into the zip
+          if [ -d "${{ env.kernelDir }}/modules_out" ]; then
+            mkdir -p "$AK3/modules/system/lib/modules"
+            cp ${{ env.kernelDir }}/modules_out/*.ko "$AK3/modules/system/lib/modules/"
+            cat > "$AK3/modules/system/lib/modules/load_nethunter_wifi.sh" <<'EOF'
+          #!/system/bin/sh
+          # Load the NetHunter external Wi-Fi driver (TL-WN722N v2/v3).
+          # Requires root. Run from a root shell on the device:
+          #   sh /system/lib/modules/load_nethunter_wifi.sh
+          MODDIR=${0%/*}
+          if ! grep -q cfg80211 /proc/modules 2>/dev/null; then
+            echo "Note: cfg80211 is built into this kernel (not a module)"
+          fi
+          insmod "$MODDIR/8188eu.ko" && echo "8188eu loaded" || echo "insmod failed"
+          ip link set wlan0 down 2>/dev/null
+          echo "Adapter ready. Check: ip link  |  iw dev"
+          EOF
+            echo "rtl8188eus module packed into AnyKernel zip"
+          fi
+
           cat > "$AK3/anykernel.sh" <<'EOF'
           # AnyKernel3 Ramdisk Mod Script
           ## osm0sis @ xda-developers
@@ -260,9 +324,9 @@ jobs:
           ## AnyKernel setup
           # global properties
           properties() { '
-          kernel.string=SuiKernelNethunter-GKI-rock (KernelSU-Next + SUSFS)
+          kernel.string=SuiKernelNethunter-GKI-rock (KernelSU-Next + SUSFS + NetHunter WiFi)
           do.devicecheck=0
-          do.modules=0
+          do.modules=1
           do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
@@ -322,6 +386,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: "Upload rtl8188eus module"
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtl8188eus-${{ env.kernelDevice }}-${{ env.kernelName }}
+          path: ${{ env.kernelDir }}/modules_out/*.ko
+          if-no-files-found: error
+          retention-days: 7
+
       - name: "Upload AnyKernel3 flashable zip"
         uses: actions/upload-artifact@v4
         with:
@@ -341,9 +413,14 @@ jobs:
             Automated GKI build for rock (Poco M5 / Redmi 11 Prime 5G)
             - Kernel: ${{ env.kernelRepo }} (${{ env.kernelBranch }})
             - KernelSU-Next (pershoot dev-susfs fork) + SUSFS
+            - NetHunter: HID gadget, RNDIS, mac80211 + ath9k_htc built-in, rtl8188eus module (TL-WN722N v2/v3)
             - Defconfig: ${{ env.DEFCONFIG_NAME }}
 
             **Install**: flash `AnyKernel3-*.zip` in recovery, or unpack and re-pack `Image` into your boot image.
+
+            **External Wi-Fi (TL-WN722N v2/v3)**: after flashing, from a root shell run
+            `sh /system/lib/modules/load_nethunter_wifi.sh` with the adapter plugged in
+            (OTG + powered hub recommended). Monitor mode via `iw dev wlan0 set monitor none`.
           files: |
             ${{ env.AK3ZIP }}
             ${{ env.AK3ZIP }}.sha256
