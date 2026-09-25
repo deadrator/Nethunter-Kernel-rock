@@ -21,9 +21,9 @@ jobs:
         id: generate-matrix
         run: |
           echo "repos<> $GITHUB_OUTPUT
-          cat  \({{ env.CONFIGURATION }} >>\)GITHUB_OUTPUT
+          cat \({{ env.CONFIGURATION }} >>\)GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-
+          
   Build-Kernel:
     name: "🐎 Build kernel"
     runs-on: ubuntu-latest
