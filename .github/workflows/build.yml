@@ -84,7 +84,13 @@ jobs:
             else
               git clone --depth=1 "$repo" "toolchains/$name"
             fi
-            echo "$(pwd)/toolchains/$name/bin" >> "$GITHUB_PATH"
+            # Toolchain layouts differ: proton-clang has bin/ at the repo root,
+            # AOSP prebuilts nest it under clang-rXXXXXX/bin. Register every
+            # bin dir found so the compilers/linkers land on PATH.
+            find "$(pwd)/toolchains/$name" -maxdepth 3 -type d -name bin | while read -r binDir; do
+              echo "$binDir" >> "$GITHUB_PATH"
+              echo "PATH += $binDir"
+            done
           done
 
       - name: "Set args"
@@ -144,6 +150,8 @@ jobs:
           args: ${{ steps.generate-args.outputs.args }}
         shell: bash
         run: |
+          command -v clang || { echo "FATAL: clang not on PATH"; ls -R ../toolchains | head -40; exit 1; }
+          command -v ld.lld || { echo "FATAL: ld.lld not on PATH"; ls -R ../toolchains | head -40; exit 1; }
           make ${args} ${{ env.DEFCONFIG_NAME }}
           grep -E "CONFIG_LOCALVERSION=|CONFIG_LTO|CONFIG_KPROBES|CONFIG_KSU=|CONFIG_KSU_SUSFS=" "${{ env.OUT_DIR }}/.config" || true
 
