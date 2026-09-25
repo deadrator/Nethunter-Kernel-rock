@@ -265,6 +265,17 @@ jobs:
           # NetHunter kernel packages.
           git clone --depth=1 -b v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git ../rtl8188eus
 
+          # GKI exports filp_open/kernel_read inside a restricted VFS symbol
+          # namespace; the rtl driver uses both, so it must import the
+          # namespace or modpost rejects the module. MODULE_IMPORT_NS takes an
+          # unquoted token on 5.10 kernels. Appended at file scope.
+          RTL_INTC=../rtl8188eus/os_dep/linux/os_intfs.c
+          test -f "$RTL_INTC"
+          if ! grep -q "MODULE_IMPORT_NS" "$RTL_INTC"; then
+            printf '\n/* GKI: import the restricted VFS namespace used by filp_open/kernel_read */\nMODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n' >> "$RTL_INTC"
+          fi
+          grep -q "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver)" "$RTL_INTC"
+
           # Invoke straight through the kernel build system: the driver's own
           # Makefile has a KERNELRELEASE-gated kbuild section (obj-
           # $(CONFIG_RTL8188EU)), so M=<driver> is all the harness it needs.
