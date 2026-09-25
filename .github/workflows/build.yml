@@ -338,8 +338,10 @@ jobs:
           kernel.string=SuiKernelNethunter-GKI-rock (KernelSU-Next + SUSFS + NetHunter WiFi)
           do.devicecheck=0
           # The 8188eu.ko is delivered via the rtl8188eus artifact / Stryker,
-          # not the boot ramdisk: rock's boot image has no modifiable
+          # not the boot ramdisk: the rock boot image has no modifiable
           # ramdisk for the systemless overlay to land in.
+          # NOTE: no apostrophes allowed anywhere in this properties block -
+          # it is a single-quoted string (AK3 convention).
           do.modules=0
           do.systemless=1
           do.cleanup=1
@@ -367,13 +369,18 @@ jobs:
           # GKI: boot holds only kernel+dtb (the generic ramdisk lives in
           # init_boot), so unpack without ramdisk handling, then repack+flash.
           # flash_boot skips the ramdisk-repack stage that write_boot runs
-          # (there is no ramdisk to repack); write_boot alone also repacked
-          # from a split_img that never existed - the "Repacking image
-          # failed. Aborting..." failure from the user's install log.
+          # (there is no ramdisk to repack); write_boot alone repacked from a
+          # split_img that never existed, the repack-abort failure seen on
+          # device. No apostrophes in comments: this file must stay parseable
+          # by the on-device mksh shell.
           split_boot;
           flash_boot;
           ## end boot install
           EOF
+
+          # Parse-gate the generated installer at BUILD time, not on device
+          bash -n "$AK3/anykernel.sh" || { echo "FATAL: generated anykernel.sh has a syntax error"; exit 1; }
+          grep -q "split_boot" "$AK3/anykernel.sh" && grep -q "flash_boot" "$AK3/anykernel.sh"
 
           cd "$AK3"
           ZIPNAME="SuiKernelNethunter-rock-$(date +%Y%m%d-%H%M).zip"
