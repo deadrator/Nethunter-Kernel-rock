@@ -41,7 +41,7 @@ jobs:
         repos: ${{ fromJSON(needs.Set-repos.outputs.repos) }}
     env:
       VARIANT: ${{ matrix.repos.variant }}
-      VARIANT_LABEL: ${{ matrix.repos.variant == 'nethunter' && 'NetHunter WiFi (cfg80211/mac80211/ath9k_htc + rtl8188eus)' || 'boot-safe (author parity)' }}
+      VARIANT_LABEL: ${{ matrix.repos.variant == 'nethunter' && 'gzip kernel, built-in rtl8188eus (TL-WN722N v2/v3 2357:010c), no mac80211/ath9k' || 'boot-safe (author parity, gzip kernel)' }}
       KERNEL_PIN: "287826cf842f01c75b8b256237d759d8bc92dd92"
       SUSFS_PIN: "6dc93089a0cedfec3d31739e747231f99d751e9e"
       KSU_PIN: "d575262c1b40180a0f915544f42d8c4ab34b874b"
@@ -79,10 +79,14 @@ jobs:
           grep -q 'CLANG_BRANCH="11.0"' builder/config.sh
           # Gate: telegram reporting is disabled
           grep -q 'reply_file() { :; }' builder/functions.sh
-          # Gate: nethunter variant injects the wireless stack
+          # Gate: nethunter variant vendors rtl8188eus built-in and does not
+          # enable the mac80211/ath9k stack that bootlooped rock.
           if [ "${{ env.VARIANT }}" = "nethunter" ]; then
-            grep -q 'CONFIG_ATH9K_HTC' builder/build.sh
-            grep -q 'CONFIG_CFG80211' builder/build.sh
+            grep -q 'config --enable CONFIG_RTL8188EU' builder/build.sh
+            grep -q 'config --enable CONFIG_CFG80211' builder/build.sh
+            grep -q 'config --disable CONFIG_MAC80211' builder/build.sh
+            grep -q 'config --disable CONFIG_ATH9K_HTC' builder/build.sh
+            grep -q '0x2357, 0x010c' builder/build.sh
           fi
           echo "Builder prepared: variant=${{ env.VARIANT }}"
 
@@ -99,143 +103,23 @@ jobs:
           ./build.sh
           test -f out/kernel.log || true
 
-      - name: "Locate artifacts + swap in rock installer"
+      - name: "Pack gzip kernel + rock installer (never lz4)"
         shell: bash
         run: |
           set -euo pipefail
-          # The pack step copies the finished zip to builder/artifacts/
+          # Author zip ships an uncompressed Image. On device, magiskboot
+          # repack then compresses that Image with the stock kernel format,
+          # which is lz4 — and an lz4 kernel bootloops rock after the write
+          # succeeds. pack_rock_ak3.sh replaces it with Image.gz and an
+          # installer that refuses to flash lz4 and does not recompress the
+          # stock lz4-legacy ramdisk.
           ZIP=$(ls builder/artifacts/*.zip | head -n 1)
           test -n "$ZIP" || { echo "FATAL: no AK3 zip produced"; exit 1; }
+          chmod +x scripts/pack_rock_ak3.sh
+          scripts/pack_rock_ak3.sh "$ZIP" installer/anykernel.sh "$ZIP"
           echo "AK3ZIP=$(basename "$ZIP")" >> "$GITHUB_ENV"
-
-          # Repack the zip with a rock-adapted anykernel.sh:
-          #  - GKI boot.img v4 on rock: kernel is gzip'd, ramdisk is
-          #    lz4-legacy (02 21 4c 18) and lives INSIDE boot (no init_boot).
-          #    split_boot+flash_boot re-flashes the kernel WITHOUT touching
-          #    the ramdisk bytes -> no lz4 repack on device, exactly what
-          #    the "lz4 won't boot" warning points at.
-          #  - zeroed properties block (no kernel.string): the full 128-char
-          #    cmdline in rock's stock v4 header cannot carry a second one.
-          #  - do.modules=0 / do.systemless=0: nothing ships in the ramdisk.
-          WORK=$(mktemp -d)
-          unzip -q "$ZIP" -d "$WORK"
-          rm -f "$WORK/anykernel.sh"
-          cat > "$WORK/anykernel.sh" <<'ROKEOF'
-          # AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
-          ## rock (Poco M5, GKI android12-5.10): kernel-only swap,
-          ## ramdisk (lz4-legacy) passed through untouched.
-
-          ## AnyKernel setup
-          # global properties
-          properties() { '
-          do.devicecheck=0
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=
-          device.name2=
-          device.name3=
-          device.name4=
-          device.name5=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; } # end properties
-
-          # boot files attributes
-          boot_attributes() {
-          set_perm_recursive 0 0 755 644 $home/img/*;
-          } # end attributes
-
-          ## AnyKernel install
-          ## boot shell variables
-          BLOCK=boot;
-          IS_SLOT_DEVICE=auto;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-
-          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-          . tools/ak3-core.sh
-
-          ui_print " "
-          ui_print "SuiKernel rock - KernelSU-Next + SUSFS"
-          ui_print "Kernel-only flash: ramdisk untouched"
-          ui_print " "
-
-          # GKI boot: kernel + dtb, vendor ramdisk inside boot (no init_boot).
-          # split_boot + flash_boot = no mkbootfs/lz4 repack of the ramdisk.
-          split_boot
-          flash_boot
-          ROKEOF
-          # Parse-gate the installer at BUILD time, not on device
-          bash -n "$WORK/anykernel.sh" || { echo "FATAL: generated anykernel.sh has a syntax error"; exit 1; }
-          grep -q "split_boot" "$WORK/anykernel.sh" && grep -q "flash_boot" "$WORK/anykernel.sh"
-
-          zip -q -9 -j "$ZIP" "$WORK/anykernel.sh"
-          rm -rf "$WORK"
-
-          cp "$ZIP" .
-          sha256sum "$(basename "$ZIP")" > "builder/artifacts/$(basename "$ZIP").sha256"
+          sha256sum "$ZIP" > "$ZIP.sha256"
           echo "ZIP at: $(basename "$ZIP")"
-
-      - name: "Build rtl8188eus module (TL-WN722N v2/v3) [nethunter only]"
-        if: ${{ matrix.repos.variant == 'nethunter' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd builder/ksrc
-          # aircrack-ng rtl8188eus driver for Realtek RTL8188EUS dongles
-          # (TP-Link TL-WN722N v2/v3). Built against the exact kernel that
-          # ships it (MODVERSIONS CRCs must match). Loaded manually or via
-          # Stryker - not packed into the AK3 zip (kernel-only flash).
-          git clone --depth=1 -b v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git ../rtl8188eus
-
-          # GKI restricts filp_open/kernel_read behind a VFS symbol namespace;
-          # the rtl driver must import it or modpost rejects the module.
-          # (5.10 macro takes a bare token - no quotes.)
-          RTL_INTC=../rtl8188eus/os_dep/linux/os_intfs.c
-          test -f "$RTL_INTC"
-          if ! grep -q "MODULE_IMPORT_NS" "$RTL_INTC"; then
-            printf '\n/* GKI: import the restricted VFS namespace used by filp_open/kernel_read */\nMODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n' >> "$RTL_INTC"
-          fi
-          grep -q "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver)" "$RTL_INTC"
-
-          # clang-12 (r416183b) does not know GCC-only -Wno-cast-function-type
-          # and the kernel hard-sets -Werror=unknown-warning-option; the driver
-          # Makefile adds that flag unconditionally (run #20). Strip the flag.
-          sed -i 's|^EXTRA_CFLAGS += -Wno-cast-function-type|# GCC-only flag, unknown to clang-12 (kernel: -Werror=unknown-warning-option)|' ../rtl8188eus/Makefile
-          ! grep -q "Wno-cast-function-type" ../rtl8188eus/Makefile
-
-          # Author-parity build flags; O= kept for symbol CRC resolution.
-          CLANGDIR=$(pwd)/../clang
-          GCCDIR=$(pwd)/../gcc
-          if [ -d "$GCCDIR/bin" ]; then
-            export PATH="$CLANGDIR/bin:$GCCDIR/bin:$PATH"
-            P="aarch64-linux-"
-          else
-            export PATH="$CLANGDIR/bin:$PATH"
-            P="aarch64-linux-gnu-"
-          fi
-          FLAGS="-j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out CROSS_COMPILE=$P"
-          make $FLAGS M=$(pwd)/../rtl8188eus modules \
-            KSRC=$(pwd) \
-            USER_EXTRA_CFLAGS="-Wno-error" \
-            CONFIG_RTL8188EU=m 2>&1 | tail -n 60
-          MOD=$(find ../rtl8188eus -maxdepth 1 -name '*.ko' | head -1)
-          test -n "$MOD" || { echo "FATAL: rtl8188eus .ko not produced"; exit 1; }
-          # Out-of-tree modules keep full DWARF debug info (run #22: 139 MB);
-          # strip it - symbol table and MODVERSIONS CRCs are separate sections.
-          if [ -x ../clang/bin/llvm-strip ]; then
-            ../clang/bin/llvm-strip --strip-debug "$MOD"
-            echo "stripped module size: $(du -h "$MOD" | cut -f1)"
-          else
-            echo "WARNING: llvm-strip not found, shipping unstripped module"
-          fi
-          mkdir -p ../artifacts
-          cp "$MOD" ../artifacts/
-          echo "Built module: $(basename "$MOD")"
 
       - name: "Upload AK3 flashable zip"
         uses: actions/upload-artifact@v4
@@ -244,15 +128,6 @@ jobs:
           path: |
             builder/artifacts/*.zip
             builder/artifacts/*.zip.sha256
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: "Upload rtl8188eus module"
-        if: ${{ matrix.repos.variant == 'nethunter' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: rtl8188eus-rock-${{ github.run_number }}
-          path: builder/artifacts/*.ko
           if-no-files-found: error
           retention-days: 7
 
@@ -278,14 +153,14 @@ jobs:
             - Kernel: deadrator/SuiKernel-android12-5.10 @ ${{ env.KERNEL_PIN }} (suikernel-stable)
             - KernelSU-Next (pershoot dev-susfs @ ${{ env.KSU_PIN }}) + SUSFS (@ ${{ env.SUSFS_PIN }})
             - Defconfig: gki_defconfig - HID gadget (CONFIG_USB_CONFIGFS_F_HID) + RNDIS/ECM built in
-            - Installer: kernel-only (split_boot + flash_boot) - stock lz4 ramdisk untouched
+            - Kernel compression: **gzip only**. The installer aborts if the packed kernel is lz4.
+            - Ramdisk: stock lz4-legacy bytes copied through. Not recompressed.
 
-            ${{ env.VARIANT == 'nethunter' && '**NetHunter Wi-Fi**: cfg80211/mac80211/ath9k_htc are built into the kernel. For the TL-WN722N v2/v3 grab `8188eu.ko` from the artifacts, then: `adb push 8188eu.ko /data/local/tmp/` + `insmod /data/local/tmp/8188eu.ko` (Stryker can manage the driver itself). Monitor mode: `iw dev wlanX set monitor none`.' || 'No wireless config changes - parity with the upstream SuiKernel builds.' }}
+            ${{ env.VARIANT == 'nethunter' && '**TL-WN722N v2/v3**: aircrack-ng rtl8188eus is built into the kernel (`CONFIG_RTL8188EU=y`) and already knows USB id `2357:010c`. Plug the adapter in (OTG). No insmod. mac80211 and ath9k_htc are not enabled.' || 'No wireless config changes - parity with the upstream SuiKernel builds, plus the gzip installer.' }}
 
-            **Install**: flash `SuiKernel-rock-*.zip` in recovery (or via the author's flash_kernel.sh with root). Boot partition only - stock ramdisk, dtbo, vbmeta untouched.
+            **Install**: flash the zip in Kernel Flasher or recovery. Boot partition only - stock ramdisk, dtbo, vbmeta untouched. If this build still bootloops, flash the matching `safe` zip from the same run to get back in.
           files: |
             builder/artifacts/*.zip
             builder/artifacts/*.zip.sha256
-            builder/artifacts/*.ko
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
