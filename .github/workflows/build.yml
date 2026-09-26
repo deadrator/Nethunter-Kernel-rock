@@ -75,7 +75,8 @@ jobs:
           # Gate: config.sh now points at the forked kernel source
           grep -q 'KERNEL_REPO="https://github.com/deadrator/SuiKernel-android12-5.10"' builder/config.sh
           grep -q 'KERNEL_DEFCONFIG="gki_defconfig"' builder/config.sh
-          grep -q 'CLANG_URL=.*clang-r416183b.tar.gz' builder/config.sh
+          grep -q 'CLANG_URL=.*clang-r416183b' builder/config.sh
+          grep -q 'CLANG_BRANCH="11.0"' builder/config.sh
           # Gate: telegram reporting is disabled
           grep -q 'reply_file() { :; }' builder/functions.sh
           # Gate: nethunter variant injects the wireless stack

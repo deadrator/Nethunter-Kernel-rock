@@ -57,6 +57,22 @@ def main() -> None:
         f'KERNEL_REPO="{args.kernel_repo}"',
         "config.sh KERNEL_REPO",
     )
+    # googlesource's +archive endpoint has been unreachable from GH runners
+    # (killed runs #16n/#17/#18 with aria2c AND retrying curl); use the
+    # GitHub mirror of the exact same clang-r416183b via the builder's own
+    # git-clone path (CLANG_BRANCH set => git clone branch).
+    s = replace_once(
+        s,
+        'CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b669748458572622ed716407611633c5415da25c/clang-r416183b.tar.gz"',
+        'CLANG_URL="https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r416183b"',
+        "config.sh CLANG_URL",
+    )
+    s = replace_once(
+        s,
+        'CLANG_BRANCH=""',
+        'CLANG_BRANCH="11.0"',
+        "config.sh CLANG_BRANCH",
+    )
     p.write_text(s)
 
     # ---- build.sh ---------------------------------------------------------
