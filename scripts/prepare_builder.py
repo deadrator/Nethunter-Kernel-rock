@@ -150,13 +150,19 @@ def main() -> None:
     s = p.read_text()
 
     old = 'bash ksu_setup.sh "$REF"'
+    # setup.sh clones into KernelSU-Next (repo name); pin whatever dir it
+    # actually created so the KSU checkout is reproducible.
     s = replace_once(
         s,
         old,
         old
-        + f"\n  git -C KernelSU checkout -q {args.ksu_pin} 2>/dev/null || "
-        + f"{{ git -C KernelSU fetch -q origin {args.ksu_pin}; "
-        + "git -C KernelSU checkout -q FETCH_HEAD; }",
+        + '\n  for KSUD in KernelSU-Next KernelSU; do\n'
+        + '    if [[ -d $KSUD/.git ]]; then\n'
+        + f'      git -C $KSUD checkout -q {args.ksu_pin} 2>/dev/null || '
+        + f'{{ git -C $KSUD fetch -q origin {args.ksu_pin}; '
+        + 'git -C $KSUD checkout -q FETCH_HEAD; }\n'
+        + '    fi\n'
+        + '  done',
         "ksu setup call",
     )
 
