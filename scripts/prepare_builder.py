@@ -103,6 +103,8 @@ def main() -> None:
         + "\ngit -C $KSRC fetch -q origin "
         + args.kernel_pin
         + " && git -C $KSRC checkout -q FETCH_HEAD"
+        + '\nrm -f "$KSRC/net/ipv4/Kconfig.rej"  # stale reject tracked in 287826cf8, bbr3 already in Kconfig\n'
+        + 'rm -f "$KSRC/fs/proc/bootconfig.c.rej"\n'
     )
     if args.variant == "nethunter":
         # Runs in the builder, after the kernel tree exists and before
@@ -160,11 +162,27 @@ grep -q 'rtl8188eus/Kconfig' "$KCFG"
         '  patch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch '
         '|| log "Warning: Patch applied with fuzz or failed."'
     )
-    susfs_patch = r"""  if ! patch --batch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch; then
+    susfs_patch = r"""  # The kernel repo at 287826cf8 tracks a stale net/ipv4/Kconfig.rej (bbr3 addition already in Kconfig).
+  # Remove any pre-existing rejects so the check below only sees new ones from SUSFS.
+  rm -f ./net/ipv4/Kconfig.rej ./fs/proc/bootconfig.c.rej
+  find . -type f -name '*.rej' -delete 2>/dev/null || true
+  if ! patch --batch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch; then
+    # Handle known stale Kconfig.rej (bbr3 addition) that is tracked in kernel repo 287826cf8.
+    # Only remove it if its content is the bbr3 addition and Kconfig already has that line.
+    if [ -f ./net/ipv4/Kconfig.rej ]; then
+      if grep -q 'bbr3' ./net/ipv4/Kconfig.rej 2>/dev/null && grep -q 'DEFAULT_BBR3' ./net/ipv4/Kconfig 2>/dev/null; then
+        log "Removing stale net/ipv4/Kconfig.rej (bbr3 already in Kconfig)"
+        rm -f ./net/ipv4/Kconfig.rej
+      fi
+    fi
     REJECTS="$(find . -type f -name '*.rej' -print | LC_ALL=C sort)"
     if [ "$REJECTS" != "./fs/proc/bootconfig.c.rej" ]; then
       log "FATAL: unexpected SUSFS patch rejects"
       printf '%s\n' "$REJECTS" >&2
+      for r in $REJECTS; do
+        echo "--- $r ---" >&2
+        cat "$r" >&2 || true
+      done
       exit 1
     fi
     log "Repairing SUSFS bootconfig hook for SuiKernel context drift..."
