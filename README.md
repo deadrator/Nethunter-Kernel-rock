@@ -1,4 +1,8 @@
+##bootloop please dont use
+
+
 <div align = center>
+
 
 <img src="./.assets/DogDayAndroid.png" width="200" height="175" alt="banner">
 
@@ -212,6 +216,9 @@ This is just a suggestion, and we do not provide a specific guide.
 # Star history
 
 [![Star History](https://starchart.cc/DogDayAndroid/Android-Kernel-Builder.svg)](https://starchart.cc/DogDayAndroid/Android-Kernel-Builder)
+
+
+
 
 # License
 
