@@ -63,6 +63,21 @@ def main() -> None:
     p = root / "build.sh"
     s = p.read_text()
 
+    # googlesource's +archive endpoint rejects aria2c's 16 parallel segments
+    # (killed run #16 nethunter and both runs of #17); single-connection curl
+    # with retries succeeded on the same runner class in run #16.
+    old = (
+        'aria2c -q -c -x16 -s32 -k8M --file-allocation=falloc '
+        '--timeout=60 --retry-wait=5 -o tarball "$CLANG_URL"'
+    )
+    s = replace_once(
+        s,
+        old,
+        'curl -fL --retry 5 --retry-delay 10 --retry-all-errors '
+        '--connect-timeout 30 -o tarball "$CLANG_URL"',
+        "clang download transport",
+    )
+
     old = "git clone -q --depth=1 $KERNEL_REPO -b $KERNEL_BRANCH $KSRC"
     s = replace_once(
         s,
