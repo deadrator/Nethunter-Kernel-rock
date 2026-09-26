@@ -13,10 +13,10 @@ What it does, in order:
      requires a token; the section's own guards would let a 403 page through
      into unzip and kill the build).
   5. build.sh: for the "nethunter" variant, vendor aircrack-ng rtl8188eus into
-     the kernel tree and build it in (CONFIG_RTL8188EU=y) with cfg80211.
-     mac80211 and ath9k_htc stay off — those built-ins are what bootlooped
-     rock. The USB ID 2357:010c is in the driver's table, so TL-WN722N v2/v3
-     binds with no insmod.
+     the kernel tree, normalize its legacy Kconfig help token, and build it
+     in (CONFIG_RTL8188EU=y) with cfg80211. mac80211 and ath9k_htc stay off
+     — those built-ins are what bootlooped rock. The USB ID 2357:010c is in
+     the driver's table, so TL-WN722N v2/v3 binds with no insmod.
   6. functions.sh: pin the KernelSU-Next checkout to an exact commit.
   7. functions.sh: neutralize the Telegram report functions (this fork has no
      bot secrets; no-ops keep the author's control flow intact).
@@ -115,6 +115,11 @@ DRV="$KSRC/drivers/net/wireless/rtl8188eus"
 rm -rf "$DRV"
 git clone --depth=1 -q -b v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git "$DRV"
 grep -q '0x2357, 0x010c' "$DRV/os_dep/linux/usb_intf.c"
+# rtl8188eus v5.3.9 uses the legacy ---help--- token. Android's 5.10
+# Kconfig parser only accepts the modern, indented "help" statement.
+sed -i 's/^\([[:blank:]]*\)---help---[[:blank:]]*$/\1help/' "$DRV/Kconfig"
+grep -q '^[[:blank:]][[:blank:]]*help[[:blank:]]*$' "$DRV/Kconfig"
+! grep -q -- '---help---' "$DRV/Kconfig"
 sed -i '/Wno-cast-function-type/d' "$DRV/Makefile"
 sed -i 's/^CONFIG_PLATFORM_I386_PC = y/CONFIG_PLATFORM_I386_PC = n/' "$DRV/Makefile"
 sed -i '1i EXTRA_CFLAGS += -Wno-error -DCONFIG_IOCTL_CFG80211 -DRTW_USE_CFG80211_STA_EVENT -DCONFIG_LITTLE_ENDIAN' "$DRV/Makefile"
