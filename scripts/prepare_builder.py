@@ -143,6 +143,37 @@ def main() -> None:
         )
         s = replace_once(s, anchor, wifi + anchor, "KSU config anchor")
 
+        # Run #21: the injected =y lines were silently dropped during the
+        # defconfig merge (only wext compiled from net/wireless; cfg80211 and
+        # mac80211 never built -> modpost "undefined" for every cfg80211
+        # symbol). Re-force them into the FINAL out/.config after the merge;
+        # the deps (RFKILL||!RFKILL is a tautology) are satisfied, so olddefconfig
+        # keeps them. Hard-fail if they still do not stick.
+        anchor2 = "make $BUILD_FLAGS $KERNEL_DEFCONFIG\n"
+        fixup = (
+            'if true; then # nethunter wireless fixup (prepare_builder)\n'
+            '  log "Diagnostics: wireless lines in gki_defconfig:"\n'
+            '  grep -n "CFG80211\\|MAC80211\\|ATH9K" arch/arm64/configs/gki_defconfig '
+            '|| log "(none found in defconfig file!)"\n'
+            '  log "Re-forcing wireless configs into final .config"\n'
+            '  ./scripts/config --file out/.config \\\n'
+            '    --enable CONFIG_CFG80211 \\\n'
+            '    --enable CONFIG_MAC80211 \\\n'
+            '    --enable CONFIG_WLAN \\\n'
+            '    --enable CONFIG_WLAN_VENDOR_ATH \\\n'
+            '    --enable CONFIG_ATH9K_HTC\n'
+            '  make $BUILD_FLAGS olddefconfig\n'
+            '  for KSYMB in CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_WLAN '
+            'CONFIG_WLAN_VENDOR_ATH CONFIG_ATH9K_HTC; do\n'
+            '    grep -q "^$KSYMB=y" out/.config || '
+            '{ log "FATAL: $KSYMB did not stick in final .config"; exit 1; }\n'
+            '  done\n'
+            '  log "Wireless configs confirmed in final .config:"\n'
+            '  grep -E "^CONFIG_(CFG80211|MAC80211|WLAN|WLAN_VENDOR_ATH|ATH9K_HTC)=" out/.config\n'
+            'fi\n'
+        )
+        s = replace_once(s, anchor2, anchor2 + fixup, "defconfig merge fixup")
+
     p.write_text(s)
 
     # ---- functions.sh -----------------------------------------------------
