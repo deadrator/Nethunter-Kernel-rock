@@ -8,7 +8,8 @@ What it does, in order:
      branch tip; we fetch+checkout the pinned SHA right after the clone).
   3. build.sh: pin the SUSFS clone to the commit the author's known-booting
      releases were built from (predates the unvalidated upstream SUS_KSTAT
-     type change of 2026-09-25).
+     type change of 2026-09-25), and repair the one known SuiKernel-specific
+     bootconfig patch context drift while rejecting every other failed hunk.
   4. build.sh: disable the KernelSU-Next manager-APK fetch (artifact download
      requires a token; the section's own guards would let a 403 page through
      into unzip and kill the build).
@@ -150,6 +151,70 @@ grep -q 'rtl8188eus/Kconfig' "$KCFG"
         + ' && git -C "$workdir/susfs" checkout -q FETCH_HEAD',
         "susfs clone pin",
     )
+
+    # The pinned SuiKernel changes the formatting of boot_config_proc_show(),
+    # so the otherwise matching upstream SUSFS patch rejects only that hunk.
+    # Do not hide arbitrary patch failures: repair this exact, understood
+    # drift and make any other reject fatal.
+    old = (
+        '  patch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch '
+        '|| log "Warning: Patch applied with fuzz or failed."'
+    )
+    susfs_patch = r"""  if ! patch --batch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch; then
+    REJECTS="$(find . -type f -name '*.rej' -print | LC_ALL=C sort)"
+    if [ "$REJECTS" != "./fs/proc/bootconfig.c.rej" ]; then
+      log "FATAL: unexpected SUSFS patch rejects"
+      printf '%s\n' "$REJECTS" >&2
+      exit 1
+    fi
+    log "Repairing SUSFS bootconfig hook for SuiKernel context drift..."
+    python3 - <<'PY'
+from pathlib import Path
+
+path = Path("fs/proc/bootconfig.c")
+data = path.read_text()
+decl_anchor = "static char *saved_boot_config;\n"
+show_anchor = "static int boot_config_proc_show(struct seq_file *m, void *v)\n{\n"
+declarations = (
+    "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
+    "extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\n"
+    "extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n"
+    "#endif\n"
+)
+hook = (
+    "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
+    "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n"
+    "\t\tif (saved_boot_config) {\n"
+    "\t\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n"
+    "\t\t\treturn 0;\n"
+    "\t\t}\n"
+    "\t}\n"
+    "#endif\n"
+)
+
+if declarations not in data:
+    if data.count(decl_anchor) != 1 or data.count(show_anchor) != 1:
+        raise SystemExit("FATAL: unexpected fs/proc/bootconfig.c layout")
+    data = data.replace(decl_anchor, decl_anchor + "\n" + declarations, 1)
+    data = data.replace(show_anchor, show_anchor + hook, 1)
+    path.write_text(data)
+
+if declarations not in path.read_text() or "\t\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n" not in path.read_text():
+    raise SystemExit("FATAL: SUSFS bootconfig hook verification failed")
+PY
+    rm -f fs/proc/bootconfig.c.rej
+  fi
+  if find . -type f -name '*.rej' -print -quit | grep -q .; then
+    log "FATAL: reject files remain after SUSFS patch"
+    find . -type f -name '*.rej' -print >&2
+    exit 1
+  fi
+  grep -q 'susfs_spoof_cmdline_or_bootconfig' fs/proc/bootconfig.c || {
+    log "FATAL: SUSFS bootconfig hook is missing after patch"
+    exit 1
+  }
+"""
+    s = replace_once(s, old, susfs_patch, "SUSFS patch application")
 
     old = (
         'if [[ "$VARIANT" == *"KernelSU-Next"* ]]; then\n'
