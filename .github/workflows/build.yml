@@ -1,8 +1,7 @@
-name: "Build kernels"
+name: "SuiKernel rock (author builder)"
 
 env:
   CONFIGURATION: "repos.json"
-  OUT_DIR: "out"
 
 on:
   workflow_dispatch:
@@ -31,7 +30,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   Build-Kernel:
-    name: "Build kernel"
+    name: "Build ${{ matrix.repos.variant }}"
     runs-on: ubuntu-latest
     needs:
       - Set-repos
@@ -41,255 +40,160 @@ jobs:
       matrix:
         repos: ${{ fromJSON(needs.Set-repos.outputs.repos) }}
     env:
-      kernelDir: ${{ format('{0}_{1}', matrix.repos.kernelSource.name, matrix.repos.kernelSource.device) }}
-      kernelName: ${{ matrix.repos.kernelSource.name }}
-      kernelRepo: ${{ matrix.repos.kernelSource.repo }}
-      kernelBranch: ${{ matrix.repos.kernelSource.branch }}
-      kernelDevice: ${{ matrix.repos.kernelSource.device }}
-      DEFCONFIG_NAME: ${{ matrix.repos.defconfig }}
-      withKernelSU: ${{ matrix.repos.withKernelSU }}
-      NETHUNTER_WIFI: ${{ matrix.repos.nethunterWiFi }}
-      VARIANT_TAG: ${{ matrix.repos.nethunterWiFi == true && 'nethunter' || 'safe' }}
-      ARCH_BOOT: arm64
+      VARIANT: ${{ matrix.repos.variant }}
+      VARIANT_LABEL: ${{ matrix.repos.variant == 'nethunter' && 'NetHunter WiFi (cfg80211/mac80211/ath9k_htc + rtl8188eus)' || 'boot-safe (author parity)' }}
+      KERNEL_PIN: "287826cf842f01c75b8b256237d759d8bc92dd92"
+      SUSFS_PIN: "6dc93089a0cedfec3d31739e747231f99d751e9e"
+      KSU_PIN: "d575262c1b40180a0f915544f42d8c4ab34b874b"
+      BUILDER_REPO: "https://github.com/deadrator/SuiKernel-GKI-Bulder"
+      BUILDER_REF: "master"
 
     steps:
-      - name: "Create working dir"
-        shell: bash
-        run: mkdir -p "${{ env.kernelDir }}"
+      - name: "Checkout"
+        uses: actions/checkout@v4
 
       - name: "Install prerequisites"
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential bc curl git zip ftp gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev lftp zstd wget libfl-dev python3 python-is-python3 libarchive-tools cpio flex bison
+          sudo rm -f /etc/apt/sources.list.d/yarn.list
+          sudo apt-get update -y
+          sudo apt-get install -y bc cpio flex bison aptitude git python3 \
+            python3-lxml tar perl wget curl lz4 zstd libarchive-tools aria2 zip unzip
+          sudo aptitude install -y libssl-dev || sudo apt-get install -y libssl-dev
 
-      - name: "Clone kernel source"
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}
+      - name: "Clone author builder + prepare for rock"
         shell: bash
         run: |
-          git clone --recursive --branch "${{ env.kernelBranch }}" "${{ env.kernelRepo }}" "${{ env.kernelName }}" --depth=1
+          git clone -q --depth=1 -b "${{ env.BUILDER_REF }}" "${{ env.BUILDER_REPO }}" builder
+          python3 scripts/prepare_builder.py \
+            --variant "${{ env.VARIANT }}" \
+            --builder builder \
+            --kernel-pin "${{ env.KERNEL_PIN }}" \
+            --susfs-pin "${{ env.SUSFS_PIN }}" \
+            --ksu-pin "${{ env.KSU_PIN }}"
 
-      - name: "Get toolchains"
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}
-        shell: bash
-        env:
-          toolchains: ${{ toJSON(matrix.repos.toolchains) }}
-        run: |
-          mkdir -p toolchains
-          echo "$toolchains" | jq -c '.[]' | while read -r tc; do
-            repo=$(echo "$tc" | jq -r '.repo // empty')
-            archive=$(echo "$tc" | jq -r '.archive // empty')
-            branch=$(echo "$tc" | jq -r '.branch // empty')
-            name=$(echo "$tc" | jq -r '.name')
-            if [ -n "$archive" ]; then
-              # Prebuilt tarball (e.g. android.googlesource.com +archive URLs)
-              mkdir -p "toolchains/$name"
-              curl -fL "$archive" -o "/tmp/${name}.tar.gz"
-              tar -xzf "/tmp/${name}.tar.gz" -C "toolchains/$name"
-            else
-              if [ -n "$branch" ]; then
-                git clone --depth=1 --branch "$branch" "$repo" "toolchains/$name"
-              else
-                git clone --depth=1 "$repo" "toolchains/$name"
-              fi
-            fi
-            # Toolchain layouts differ: proton-clang has bin/ at the repo root,
-            # AOSP prebuilts nest it under clang-rXXXXXX/bin. Register every
-            # bin dir found so the compilers/linkers land on PATH.
-            find "$(pwd)/toolchains/$name" -maxdepth 3 -type d -name bin | while read -r binDir; do
-              echo "$binDir" >> "$GITHUB_PATH"
-              echo "PATH += $binDir"
-            done
-          done
-
-      - name: "Set args"
-        id: generate-args
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
-        shell: bash
-        env:
-          params: ${{ toJSON(matrix.repos.params) }}
-        run: |
-          get_param() { echo "$params" | jq -r --arg k "$1" '.[$k] // empty'; }
-
-          args="-j$(nproc --all)"
-          if [ -n "${{ env.OUT_DIR }}" ]; then
-            mkdir -p "$(pwd)/${{ env.OUT_DIR }}"
-            args="${args} O=$(pwd)/${{ env.OUT_DIR }}"
+          # Gate: config.sh now points at the forked kernel source
+          grep -q 'KERNEL_REPO="https://github.com/deadrator/SuiKernel-android12-5.10"' builder/config.sh
+          grep -q 'KERNEL_DEFCONFIG="gki_defconfig"' builder/config.sh
+          grep -q 'CLANG_URL=.*clang-r416183b.tar.gz' builder/config.sh
+          # Gate: telegram reporting is disabled
+          grep -q 'reply_file() { :; }' builder/functions.sh
+          # Gate: nethunter variant injects the wireless stack
+          if [ "${{ env.VARIANT }}" = "nethunter" ]; then
+            grep -q 'CONFIG_ATH9K_HTC' builder/build.sh
+            grep -q 'CONFIG_CFG80211' builder/build.sh
           fi
+          echo "Builder prepared: variant=${{ env.VARIANT }}"
 
-          # Emit every parameter as VAR=value on the make command line.
-          # Array-valued params (e.g. LLVM) expand to multiple tokens.
-          for key in $(echo "$params" | jq -r 'keys[]'); do
-            val=$(get_param "$key")
-            [ -n "$val" ] || continue
-            if echo "$val" | jq empty >/dev/null 2>&1; then
-              for item in $(echo "$val" | jq -r '.[]'); do
-                args="${args} ${key}=${item}"
-              done
-            else
-              args="${args} ${key}=${val}"
-            fi
-          done
-
-          echo "args=${args}" >> "$GITHUB_OUTPUT"
-          echo "Final make args: ${args}"
-
-      - name: "Update KernelSU"
-        if: ${{ env.withKernelSU == 'true' }}
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
+      - name: "Run author build script (clones kernel, KSU-Next, SUSFS, builds, packs AK3)"
+        working-directory: builder
         shell: bash
         run: |
-          if [ -d "./KernelSU" ]; then
-            rm -rf "./KernelSU"
-          fi
-          if [ -d "./drivers/kernelsu" ]; then
-            rm -rf "./drivers/kernelsu"
-          fi
+          chmod +x *.sh
+          export GIT_CLONE_PROTECTION_ACTIVE=false
+          export STATUS=RELEASE
+          export ROOT_METHOD=KernelSU-Next
+          # Branch selection is config.sh's KERNEL_BRANCH_ENV passthrough;
+          # suikernel-stable is the default and what we pin the kernel SHA on.
+          ./build.sh
+          test -f out/kernel.log || true
 
-          # KernelSU-Next susfs fork - the variant the kernel author's own
-          # pipeline installs for this tree (SuiKernel-GKI-Bulder:
-          # install_ksu pershoot/KernelSU-Next dev-susfs)
-          curl -fLSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" -o ksu_setup.sh
-          bash ksu_setup.sh dev-susfs
-          rm -f ksu_setup.sh
-
-          ls -la ./drivers/kernelsu || true
-          # Verify the KernelSU driver is actually wired into the tree.
-          grep -q "config KSU" ./drivers/kernelsu/Kconfig
-          echo "KernelSU-Next (pershoot dev-susfs) wired into drivers/kernelsu"
-
-          log() { echo "[LOG] $*"; }
-          error() { echo "[ERROR] $*" >&2; exit 1; }
-
-          # SELinux rule injections for the tree's Yamada drivers
-          # (author's selinux.sh, injected into the KSU driver's rules.c)
-          curl -fLSs "https://raw.githubusercontent.com/LoggingNewMemory/SuiKernel-GKI-Bulder/master/selinux.sh" -o selinux.sh
-          source ./selinux.sh
-          grep -q 'ksu_allow(db, "kernel", "sysfs_leds"' drivers/kernelsu/selinux/rules.c
-          echo "SELinux rules injected"
-          rm -f selinux.sh
-
-          # Pavolia Reine property-injector integration: provides
-          # ksu_pavolia_add_prop(), required to link drivers/Yamada/*.c.
-          # Runs the author's official patch script verbatim (dry-run tested
-          # against the fork's ksud_integration.c), then hard-verifies.
-          curl -fLSs "https://raw.githubusercontent.com/LoggingNewMemory/SuiKernel-GKI-Bulder/master/PavoliaReinePatch.sh" -o PavoliaReinePatch.sh
-          source ./PavoliaReinePatch.sh
-          KSUD=drivers/kernelsu/runtime/ksud_integration.c
-          grep -q "void ksu_pavolia_add_prop" "$KSUD"
-          grep -q "EXPORT_SYMBOL(ksu_pavolia_add_prop)" "$KSUD"
-          [ "$(grep -c 'append_pavolia_rc:' "$KSUD")" -eq 2 ]
-          [ "$(grep -c 'goto append_pavolia_rc' "$KSUD")" -eq 2 ]
-          grep -q "size_t extra = ksu_rc_len + module_rc_len + pavolia_rc_len;" "$KSUD"
-          echo "Pavolia Reine KSU integration applied and verified"
-          rm -f PavoliaReinePatch.sh
-
-          # SUSFS kernel-side patches: the actual implementation of the
-          # CONFIG_KSU_SUSFS* options already present in gki_defconfig
-          rm -rf ./susfs
-          # depth=2 so the pinned parent commit is actually present for checkout
-          git clone --depth=2 -q https://gitlab.com/simonpunk/susfs4ksu -b gki-android12-5.10 ./susfs
-          # Pin to the commit predating the unvalidated upstream SUS_KSTAT
-          # type change (2026-09-25) - parity with the kernel author's
-          # known-booting releases, and a suspect removed from the rock-15
-          # bootloop investigation.
-          git -C ./susfs checkout -q 6dc93089a0cedfec3d31739e747231f99d751e9e
-          SUSFS_PATCHES=./susfs/kernel_patches
-          cp -R "$SUSFS_PATCHES"/fs/* ./fs/
-          cp -R "$SUSFS_PATCHES"/include/* ./include/
-          patch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch || echo "WARNING: susfs patch applied with fuzz or partial failure"
-          test -f ./fs/susfs.c
-          test -f ./include/linux/susfs.h
-
-          # Author's post-patch fixups: move the statfs extern below internal.h
-          # and pull security.h into susfs.c
-          python3 - <<'PYEOF'
-          with open("./fs/statfs.c") as f:
-              data = f.read()
-          data = data.replace("extern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);", "")
-          data = data.replace('#include "internal.h"', '#include "internal.h"\nextern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);')
-          with open("./fs/statfs.c", "w") as f:
-              f.write(data)
-
-          with open("./fs/susfs.c") as f:
-              data2 = f.read()
-          data2 = data2.replace("#include <linux/fs.h>", "#include <linux/fs.h>\n#include <linux/security.h>")
-          with open("./fs/susfs.c", "w") as f:
-              f.write(data2)
-          print("susfs fixups applied")
-          PYEOF
-          grep -q "susfs_sus_kstat_spoof_vfs_statfs" ./fs/statfs.c
-          grep -q "#include <linux/security.h>" ./fs/susfs.c
-          echo "SUSFS patches applied and verified"
-
-      - name: "Make defconfig"
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
+      - name: "Locate artifacts + swap in rock installer"
         shell: bash
         run: |
-          command -v clang || { echo "FATAL: clang not on PATH"; ls -R ../toolchains | head -40; exit 1; }
-          command -v ld.lld || { echo "FATAL: ld.lld not on PATH"; ls -R ../toolchains | head -40; exit 1; }
+          set -euo pipefail
+          # The pack step copies the finished zip to builder/artifacts/
+          ZIP=$(ls builder/artifacts/*.zip | head -n 1)
+          test -n "$ZIP" || { echo "FATAL: no AK3 zip produced"; exit 1; }
+          echo "AK3ZIP=$(basename "$ZIP")" >> "$GITHUB_ENV"
 
-          # Author's config tweaks, applied to the defconfig file itself so
-          # they survive `make defconfig` (mirrors SuiKernel-GKI-Bulder)
-          DEFCONFIG_FILE=$(find ./arch/arm64/configs -name "${{ env.DEFCONFIG_NAME }}")
-          scripts/config --file "$DEFCONFIG_FILE" \
-            --enable CONFIG_KSU \
-            --disable CONFIG_KSU_MANUAL_SU \
-            --enable CONFIG_KSU_SUSFS \
-            --set-str CONFIG_LOCALVERSION "-SuiKernel-Stable-KernelSU-Next" \
-            --disable CONFIG_LOCALVERSION_AUTO
+          # Repack the zip with a rock-adapted anykernel.sh:
+          #  - GKI boot.img v4 on rock: kernel is gzip'd, ramdisk is
+          #    lz4-legacy (02 21 4c 18) and lives INSIDE boot (no init_boot).
+          #    split_boot+flash_boot re-flashes the kernel WITHOUT touching
+          #    the ramdisk bytes -> no lz4 repack on device, exactly what
+          #    the "lz4 won't boot" warning points at.
+          #  - zeroed properties block (no kernel.string): the full 128-char
+          #    cmdline in rock's stock v4 header cannot carry a second one.
+          #  - do.modules=0 / do.systemless=0: nothing ships in the ramdisk.
+          WORK=$(mktemp -d)
+          unzip -q "$ZIP" -d "$WORK"
+          rm -f "$WORK/anykernel.sh"
+          cat > "$WORK/anykernel.sh" <<'ROKEOF'
+          # AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+          ## rock (Poco M5, GKI android12-5.10): kernel-only swap,
+          ## ramdisk (lz4-legacy) passed through untouched.
 
-          # NetHunter external Wi-Fi support is VARIANT-GATED (repos.json:
-          # nethunterWiFi). Enabling cfg80211/mac80211 built-in changes struct
-          # net_device layout and symbol CRCs, which can break MIUI vendor
-          # module loading - the suspected cause of the rock-15 bootloop. The
-          # default variant stays author-parity (boot-safe).
-          if [ "${{ env.NETHUNTER_WIFI }}" = "true" ]; then
-            scripts/config --file "$DEFCONFIG_FILE" \
-              --enable CONFIG_CFG80211 \
-              --enable CONFIG_MAC80211 \
-              --enable CONFIG_WLAN \
-              --enable CONFIG_WLAN_VENDOR_ATH \
-              --enable CONFIG_ATH9K_HTC
-            echo "NetHunter variant: wireless configs enabled"
-          fi
-          touch .scmversion
+          ## AnyKernel setup
+          # global properties
+          properties() { '
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=
+          device.name2=
+          device.name3=
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; } # end properties
 
-          make ${args} ${{ env.DEFCONFIG_NAME }}
-          grep -E "CONFIG_LOCALVERSION=|CONFIG_LTO|CONFIG_KPROBES|CONFIG_KSU=|CONFIG_KSU_SUSFS=" "${{ env.OUT_DIR }}/.config" || true
+          # boot files attributes
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $home/img/*;
+          } # end attributes
 
-      - name: "Build kernel"
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
+          ## AnyKernel install
+          ## boot shell variables
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh
+
+          ui_print " "
+          ui_print "SuiKernel rock - KernelSU-Next + SUSFS"
+          ui_print "Kernel-only flash: ramdisk untouched"
+          ui_print " "
+
+          # GKI boot: kernel + dtb, vendor ramdisk inside boot (no init_boot).
+          # split_boot + flash_boot = no mkbootfs/lz4 repack of the ramdisk.
+          split_boot
+          flash_boot
+          ROKEOF
+          # Parse-gate the installer at BUILD time, not on device
+          bash -n "$WORK/anykernel.sh" || { echo "FATAL: generated anykernel.sh has a syntax error"; exit 1; }
+          grep -q "split_boot" "$WORK/anykernel.sh" && grep -q "flash_boot" "$WORK/anykernel.sh"
+
+          zip -q -9 -j "$ZIP" "$WORK/anykernel.sh"
+          rm -rf "$WORK"
+
+          cp "$ZIP" .
+          sha256sum "$(basename "$ZIP")" > "builder/artifacts/$(basename "$ZIP").sha256"
+          echo "ZIP at: $(basename "$ZIP")"
+
+      - name: "Build rtl8188eus module (TL-WN722N v2/v3) [nethunter only]"
+        if: ${{ matrix.repos.variant == 'nethunter' }}
         shell: bash
         run: |
-          set -o pipefail
-          make ${args} 2>&1 | tail -n 120
-          test -f "${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image" || { echo "Image missing - build failed"; exit 1; }
-
-      - name: "Build rtl8188eus module (TL-WN722N v2/v3)"
-        if: ${{ matrix.repos.nethunterWiFi == true }}
-        working-directory: ${{ github.workspace }}/${{ env.kernelDir }}/${{ env.kernelName }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
-        shell: bash
-        run: |
+          set -euo pipefail
+          cd builder/ksrc
           # aircrack-ng rtl8188eus driver for Realtek RTL8188EUS dongles
-          # (TP-Link TL-WN722N v2/v3). Built as an external module against the
-          # just-built kernel tree; the module is packed into the AnyKernel
-          # zip below (and uploaded as its own artifact). Android does not
-          # auto-load external modules, so it is loaded with root via the
-          # included load script or a manual insmod - same as the official
-          # NetHunter kernel packages.
+          # (TP-Link TL-WN722N v2/v3). Built against the exact kernel that
+          # ships it (MODVERSIONS CRCs must match). Loaded manually or via
+          # Stryker - not packed into the AK3 zip (kernel-only flash).
           git clone --depth=1 -b v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git ../rtl8188eus
 
-          # GKI exports filp_open/kernel_read inside a restricted VFS symbol
-          # namespace; the rtl driver uses both, so it must import the
-          # namespace or modpost rejects the module. MODULE_IMPORT_NS takes an
-          # unquoted token on 5.10 kernels. Appended at file scope.
+          # GKI restricts filp_open/kernel_read behind a VFS symbol namespace;
+          # the rtl driver must import it or modpost rejects the module.
+          # (5.10 macro takes a bare token - no quotes.)
           RTL_INTC=../rtl8188eus/os_dep/linux/os_intfs.c
           test -f "$RTL_INTC"
           if ! grep -q "MODULE_IMPORT_NS" "$RTL_INTC"; then
@@ -297,184 +201,76 @@ jobs:
           fi
           grep -q "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver)" "$RTL_INTC"
 
-          # Invoke straight through the kernel build system: the driver's own
-          # Makefile has a KERNELRELEASE-gated kbuild section (obj-
-          # $(CONFIG_RTL8188EU)), so M=<driver> is all the harness it needs.
-          # O= is kept so kbuild resolves CONFIG_MODVERSIONS symbol CRCs from
-          # out/Module.symvers of the kernel we just built.
-          # CONFIG_RTL8188EU=m replaces the export done by its bare `make`
-          # target, which we bypass.
-          make ${args} M=$(pwd)/../rtl8188eus modules \
+          # Author-parity build flags; O= kept for symbol CRC resolution.
+          CLANGDIR=$(pwd)/../clang
+          GCCDIR=$(pwd)/../gcc
+          if [ -d "$GCCDIR/bin" ]; then
+            export PATH="$CLANGDIR/bin:$GCCDIR/bin:$PATH"
+            P="aarch64-linux-"
+          else
+            export PATH="$CLANGDIR/bin:$PATH"
+            P="aarch64-linux-gnu-"
+          fi
+          FLAGS="-j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out CROSS_COMPILE=$P"
+          make $FLAGS M=$(pwd)/../rtl8188eus modules \
             KSRC=$(pwd) \
             USER_EXTRA_CFLAGS="-Wno-error" \
             CONFIG_RTL8188EU=m 2>&1 | tail -n 60
           MOD=$(find ../rtl8188eus -maxdepth 1 -name '*.ko' | head -1)
           test -n "$MOD" || { echo "FATAL: rtl8188eus .ko not produced"; exit 1; }
-          echo "Built module: $MOD"
-          mkdir -p ../modules_out
-          cp "$MOD" ../modules_out/
-          echo "RTLKO=$(basename "$MOD")" >> "$GITHUB_ENV"
+          mkdir -p ../artifacts
+          cp "$MOD" ../artifacts/
+          echo "Built module: $(basename "$MOD")"
 
-      - name: "Assemble AnyKernel3 flashable zip"
-        shell: bash
-        run: |
-          AK3="${{ env.kernelDir }}/AnyKernel3"
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$AK3"
-          rm -rf "$AK3/.git" "$AK3/.github" "$AK3/README.md" "$AK3/anykernel.sh"
-
-          cp "${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image" "$AK3/Image"
-
-          DTB="${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/dtb"
-          if [ -f "$DTB" ]; then
-            cp "$DTB" "$AK3/dtb"
-          fi
-
-          # Pack the rtl8188eus module (TL-WN722N v2/v3) into the zip
-          if [ -d "${{ env.kernelDir }}/modules_out" ]; then
-            mkdir -p "$AK3/modules/system/lib/modules"
-            cp ${{ env.kernelDir }}/modules_out/*.ko "$AK3/modules/system/lib/modules/"
-            cat > "$AK3/modules/system/lib/modules/load_nethunter_wifi.sh" <<'EOF'
-          #!/system/bin/sh
-          # Load the NetHunter external Wi-Fi driver (TL-WN722N v2/v3).
-          # Requires root. Run from a root shell on the device:
-          #   sh /system/lib/modules/load_nethunter_wifi.sh
-          MODDIR=${0%/*}
-          if ! grep -q cfg80211 /proc/modules 2>/dev/null; then
-            echo "Note: cfg80211 is built into this kernel (not a module)"
-          fi
-          insmod "$MODDIR/8188eu.ko" && echo "8188eu loaded" || echo "insmod failed"
-          ip link set wlan0 down 2>/dev/null
-          echo "Adapter ready. Check: ip link  |  iw dev"
-          EOF
-            echo "rtl8188eus module packed into AnyKernel zip"
-          fi
-
-          cat > "$AK3/anykernel.sh" <<'EOF'
-          # AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
-
-          ## AnyKernel setup
-          # global properties
-          properties() { '
-          kernel.string=SuiKernelNethunter-GKI-rock-${{ env.VARIANT_TAG }} (KernelSU-Next + SUSFS)
-          do.devicecheck=0
-          # The 8188eu.ko is delivered via the rtl8188eus artifact / Stryker,
-          # not the boot ramdisk: the rock boot image has no modifiable
-          # ramdisk for the systemless overlay to land in.
-          # NOTE: no apostrophes allowed anywhere in this properties block -
-          # it is a single-quoted string (AK3 convention).
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=
-          supported.versions=
-          supported.patchlevels=
-          '; } # end properties
-
-          # boot files attributes
-          boot_attributes() {
-          set_perm_recursive 0 0 755 644 $RAMDISK/*;
-          } # end attributes
-
-          # boot shell variables
-          BLOCK=auto;
-          IS_SLOT_DEVICE=auto;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-
-          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-          . tools/ak3-core.sh;
-
-          # boot install
-          # GKI: boot holds only kernel+dtb (the generic ramdisk lives in
-          # init_boot), so unpack without ramdisk handling, then repack+flash.
-          # flash_boot skips the ramdisk-repack stage that write_boot runs
-          # (there is no ramdisk to repack); write_boot alone repacked from a
-          # split_img that never existed, the repack-abort failure seen on
-          # device. No apostrophes in comments: this file must stay parseable
-          # by the on-device mksh shell.
-          split_boot;
-          flash_boot;
-          ## end boot install
-          EOF
-
-          # Parse-gate the generated installer at BUILD time, not on device
-          bash -n "$AK3/anykernel.sh" || { echo "FATAL: generated anykernel.sh has a syntax error"; exit 1; }
-          grep -q "split_boot" "$AK3/anykernel.sh" && grep -q "flash_boot" "$AK3/anykernel.sh"
-
-          cd "$AK3"
-          ZIPNAME="SuiKernel-rock-${{ env.VARIANT_TAG }}-$(date +%Y%m%d-%H%M).zip"
-          zip -r9 "../$ZIPNAME" .
-          cd ../..
-          cp "${{ env.kernelDir }}/$ZIPNAME" .
-          sha256sum "$ZIPNAME" > "$ZIPNAME.sha256"
-          echo "AK3ZIP=$ZIPNAME" >> "$GITHUB_ENV"
-
-      - name: "Upload kernel Image"
+      - name: "Upload AK3 flashable zip"
         uses: actions/upload-artifact@v4
         with:
-          name: Image-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image
+          name: AK3-rock-${{ env.VARIANT }}-${{ github.run_number }}
+          path: |
+            builder/artifacts/*.zip
+            builder/artifacts/*.zip.sha256
           if-no-files-found: error
-          retention-days: 7
-
-      - name: "Upload Image.gz"
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image.gz-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/Image.gz
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: "Upload dtb"
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtb-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: ${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH_BOOT }}/boot/dtb
-          if-no-files-found: ignore
           retention-days: 7
 
       - name: "Upload rtl8188eus module"
-        if: ${{ matrix.repos.nethunterWiFi == true }}
+        if: ${{ matrix.repos.variant == 'nethunter' }}
         uses: actions/upload-artifact@v4
         with:
-          name: rtl8188eus-${{ env.kernelDevice }}-${{ env.kernelName }}
-          path: ${{ env.kernelDir }}/modules_out/*.ko
+          name: rtl8188eus-rock-${{ github.run_number }}
+          path: builder/artifacts/*.ko
           if-no-files-found: error
           retention-days: 7
 
-      - name: "Upload AnyKernel3 flashable zip"
+      - name: "Upload build log"
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-${{ env.kernelDevice }}-${{ env.kernelName }}-${{ env.kernelBranch }}
-          path: |
-            ${{ env.AK3ZIP }}
-            ${{ env.AK3ZIP }}.sha256
+          name: buildlog-rock-${{ env.VARIANT }}-${{ github.run_number }}
+          path: builder/build.log
           if-no-files-found: error
           retention-days: 7
 
       - name: "Release"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: rock-${{ github.run_number }}-${{ env.VARIANT_TAG }}
-          name: SuiKernel rock build ${{ github.run_number }} ${{ env.VARIANT_TAG == 'safe' && '(boot-safe, author-parity)' || '(NetHunter WiFi)' }}
+          tag_name: rock-${{ github.run_number }}-${{ env.VARIANT }}
+          name: SuiKernel rock build ${{ github.run_number }} ${{ env.VARIANT == 'safe' && '(boot-safe, author-parity)' || '(NetHunter WiFi)' }}
           body: |
-            Automated GKI build for rock (Poco M5 / Redmi 11 Prime 5G)
-            - Variant: ${{ env.VARIANT_TAG }} ${{ env.VARIANT_TAG == 'safe' && '- no wireless config changes, parity with the SuiKernel author builds' || '- cfg80211/mac80211/ath9k_htc built-in + rtl8188eus module' }}
-            - Kernel: ${{ env.kernelRepo }} (${{ env.kernelBranch }})
-            - KernelSU-Next (pershoot dev-susfs fork) + SUSFS (pinned)
-            - Defconfig: ${{ env.DEFCONFIG_NAME }}
+            SuiKernel for rock (Poco M5 / Redmi 11 Prime 5G) - GKI android12-5.10
+            Built with the author's SuiKernel-GKI-Bulder pipeline (forks, pinned).
 
-            **Install**: flash `AnyKernel3-*.zip` in recovery, or unpack and re-pack `Image` into your boot image.
+            - Variant: **${{ env.VARIANT }}** - ${{ env.VARIANT_LABEL }}
+            - Kernel: deadrator/SuiKernel-android12-5.10 @ ${{ env.KERNEL_PIN }} (suikernel-stable)
+            - KernelSU-Next (pershoot dev-susfs @ ${{ env.KSU_PIN }}) + SUSFS (@ ${{ env.SUSFS_PIN }})
+            - Defconfig: gki_defconfig - HID gadget (CONFIG_USB_CONFIGFS_F_HID) + RNDIS/ECM built in
+            - Installer: kernel-only (split_boot + flash_boot) - stock lz4 ramdisk untouched
 
-            **External Wi-Fi (NetHunter variant only, TL-WN722N v2/v3)**: grab
-            `8188eu.ko` from the `rtl8188eus-rock-*` artifact, then from a root shell:
-            `adb push 8188eu.ko /data/local/tmp/` and
-            `insmod /data/local/tmp/8188eu.ko` (Stryker can manage the driver
-            itself). Monitor mode: `iw dev wlanX set monitor none`.
+            ${{ env.VARIANT == 'nethunter' && '**NetHunter Wi-Fi**: cfg80211/mac80211/ath9k_htc are built into the kernel. For the TL-WN722N v2/v3 grab `8188eu.ko` from the artifacts, then: `adb push 8188eu.ko /data/local/tmp/` + `insmod /data/local/tmp/8188eu.ko` (Stryker can manage the driver itself). Monitor mode: `iw dev wlanX set monitor none`.' || 'No wireless config changes - parity with the upstream SuiKernel builds.' }}
+
+            **Install**: flash `SuiKernel-rock-*.zip` in recovery (or via the author's flash_kernel.sh with root). Boot partition only - stock ramdisk, dtbo, vbmeta untouched.
           files: |
-            ${{ env.AK3ZIP }}
-            ${{ env.AK3ZIP }}.sha256
+            builder/artifacts/*.zip
+            builder/artifacts/*.zip.sha256
+            builder/artifacts/*.ko
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
