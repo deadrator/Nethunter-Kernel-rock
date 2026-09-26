@@ -8,15 +8,16 @@ What it does, in order:
      branch tip; we fetch+checkout the pinned SHA right after the clone).
   3. build.sh: pin the SUSFS clone to the commit the author's known-booting
      releases were built from (predates the unvalidated upstream SUS_KSTAT
-     type change of 2026-09-25).
+     type change of 2026-09-25), and repair the one known SuiKernel-specific
+     bootconfig patch context drift while rejecting every other failed hunk.
   4. build.sh: disable the KernelSU-Next manager-APK fetch (artifact download
      requires a token; the section's own guards would let a 403 page through
      into unzip and kill the build).
   5. build.sh: for the "nethunter" variant, vendor aircrack-ng rtl8188eus into
-     the kernel tree and build it in (CONFIG_RTL8188EU=y) with cfg80211.
-     mac80211 and ath9k_htc stay off — those built-ins are what bootlooped
-     rock. The USB ID 2357:010c is in the driver's table, so TL-WN722N v2/v3
-     binds with no insmod.
+     the kernel tree, normalize its legacy Kconfig help token, and build it
+     in (CONFIG_RTL8188EU=y) with cfg80211. mac80211 and ath9k_htc stay off
+     — those built-ins are what bootlooped rock. The USB ID 2357:010c is in
+     the driver's table, so TL-WN722N v2/v3 binds with no insmod.
   6. functions.sh: pin the KernelSU-Next checkout to an exact commit.
   7. functions.sh: neutralize the Telegram report functions (this fork has no
      bot secrets; no-ops keep the author's control flow intact).
@@ -115,6 +116,11 @@ DRV="$KSRC/drivers/net/wireless/rtl8188eus"
 rm -rf "$DRV"
 git clone --depth=1 -q -b v5.3.9 https://github.com/aircrack-ng/rtl8188eus.git "$DRV"
 grep -q '0x2357, 0x010c' "$DRV/os_dep/linux/usb_intf.c"
+# rtl8188eus v5.3.9 uses the legacy ---help--- token. Android's 5.10
+# Kconfig parser only accepts the modern, indented "help" statement.
+sed -i 's/^\([[:blank:]]*\)---help---[[:blank:]]*$/\1help/' "$DRV/Kconfig"
+grep -q '^[[:blank:]][[:blank:]]*help[[:blank:]]*$' "$DRV/Kconfig"
+! grep -q -- '---help---' "$DRV/Kconfig"
 sed -i '/Wno-cast-function-type/d' "$DRV/Makefile"
 sed -i 's/^CONFIG_PLATFORM_I386_PC = y/CONFIG_PLATFORM_I386_PC = n/' "$DRV/Makefile"
 sed -i '1i EXTRA_CFLAGS += -Wno-error -DCONFIG_IOCTL_CFG80211 -DRTW_USE_CFG80211_STA_EVENT -DCONFIG_LITTLE_ENDIAN' "$DRV/Makefile"
@@ -145,6 +151,70 @@ grep -q 'rtl8188eus/Kconfig' "$KCFG"
         + ' && git -C "$workdir/susfs" checkout -q FETCH_HEAD',
         "susfs clone pin",
     )
+
+    # The pinned SuiKernel changes the formatting of boot_config_proc_show(),
+    # so the otherwise matching upstream SUSFS patch rejects only that hunk.
+    # Do not hide arbitrary patch failures: repair this exact, understood
+    # drift and make any other reject fatal.
+    old = (
+        '  patch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch '
+        '|| log "Warning: Patch applied with fuzz or failed."'
+    )
+    susfs_patch = r"""  if ! patch --batch -p1 < "$SUSFS_PATCHES"/50_add_susfs_in_gki-android12-5.10.patch; then
+    REJECTS="$(find . -type f -name '*.rej' -print | LC_ALL=C sort)"
+    if [ "$REJECTS" != "./fs/proc/bootconfig.c.rej" ]; then
+      log "FATAL: unexpected SUSFS patch rejects"
+      printf '%s\n' "$REJECTS" >&2
+      exit 1
+    fi
+    log "Repairing SUSFS bootconfig hook for SuiKernel context drift..."
+    python3 - <<'PY'
+from pathlib import Path
+
+path = Path("fs/proc/bootconfig.c")
+data = path.read_text()
+decl_anchor = "static char *saved_boot_config;\n"
+show_anchor = "static int boot_config_proc_show(struct seq_file *m, void *v)\n{\n"
+declarations = (
+    "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
+    "extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\n"
+    "extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n"
+    "#endif\n"
+)
+hook = (
+    "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n"
+    "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n"
+    "\t\tif (saved_boot_config) {\n"
+    "\t\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n"
+    "\t\t\treturn 0;\n"
+    "\t\t}\n"
+    "\t}\n"
+    "#endif\n"
+)
+
+if declarations not in data:
+    if data.count(decl_anchor) != 1 or data.count(show_anchor) != 1:
+        raise SystemExit("FATAL: unexpected fs/proc/bootconfig.c layout")
+    data = data.replace(decl_anchor, decl_anchor + "\n" + declarations, 1)
+    data = data.replace(show_anchor, show_anchor + hook, 1)
+    path.write_text(data)
+
+if declarations not in path.read_text() or "\t\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n" not in path.read_text():
+    raise SystemExit("FATAL: SUSFS bootconfig hook verification failed")
+PY
+    rm -f fs/proc/bootconfig.c.rej
+  fi
+  if find . -type f -name '*.rej' -print -quit | grep -q .; then
+    log "FATAL: reject files remain after SUSFS patch"
+    find . -type f -name '*.rej' -print >&2
+    exit 1
+  fi
+  grep -q 'susfs_spoof_cmdline_or_bootconfig' fs/proc/bootconfig.c || {
+    log "FATAL: SUSFS bootconfig hook is missing after patch"
+    exit 1
+  }
+"""
+    s = replace_once(s, old, susfs_patch, "SUSFS patch application")
 
     old = (
         'if [[ "$VARIANT" == *"KernelSU-Next"* ]]; then\n'

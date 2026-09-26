@@ -79,6 +79,11 @@ jobs:
           grep -q 'CLANG_BRANCH="11.0"' builder/config.sh
           # Gate: telegram reporting is disabled
           grep -q 'reply_file() { :; }' builder/functions.sh
+          # Gate: only the known SuiKernel bootconfig context drift is
+          # repaired; every other SUSFS patch reject is fatal.
+          grep -q 'Repairing SUSFS bootconfig hook for SuiKernel context drift' builder/build.sh
+          grep -q 'FATAL: unexpected SUSFS patch rejects' builder/build.sh
+          ! grep -q 'Warning: Patch applied with fuzz or failed' builder/build.sh
           # Gate: nethunter variant vendors rtl8188eus built-in and does not
           # enable the mac80211/ath9k stack that bootlooped rock.
           if [ "${{ env.VARIANT }}" = "nethunter" ]; then
