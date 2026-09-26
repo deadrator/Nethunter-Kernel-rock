@@ -202,6 +202,12 @@ jobs:
           fi
           grep -q "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver)" "$RTL_INTC"
 
+          # clang-12 (r416183b) does not know GCC-only -Wno-cast-function-type
+          # and the kernel hard-sets -Werror=unknown-warning-option; the driver
+          # Makefile adds that flag unconditionally (run #20). Strip the flag.
+          sed -i 's|^EXTRA_CFLAGS += -Wno-cast-function-type|# GCC-only flag, unknown to clang-12 (kernel: -Werror=unknown-warning-option)|' ../rtl8188eus/Makefile
+          ! grep -q "Wno-cast-function-type" ../rtl8188eus/Makefile
+
           # Author-parity build flags; O= kept for symbol CRC resolution.
           CLANGDIR=$(pwd)/../clang
           GCCDIR=$(pwd)/../gcc
